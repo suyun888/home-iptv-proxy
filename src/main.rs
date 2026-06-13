@@ -338,13 +338,13 @@ async fn list_m3u(
     for channel in &runtime.channels {
         body.push_str("#EXTINF:-1");
         if let Some(tvg_id) = &channel.tvg_id {
-            body.push_str(&format!(r#" tvg-id=\"{}\""#, tvg_id));
+            body.push_str(&format!(r#" tvg-id="{}""#, tvg_id));
         }
         if let Some(tvg_logo) = &channel.tvg_logo {
-            body.push_str(&format!(r#" tvg-logo=\"{}\""#, tvg_logo));
+            body.push_str(&format!(r#" tvg-logo="{}""#, tvg_logo));
         }
         body.push_str(&format!(
-            r#" group-title=\"{}\" source-name=\"{}\""#,
+            r#" group-title="{}" source-name="{}""#,
             channel.group, channel.source_name
         ));
         body.push_str(&format!(",{}\n", channel.name));
