@@ -7,14 +7,14 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Form, Path, Query, State},
     http::{HeaderMap, HeaderValue, Response, StatusCode, Uri},
-    response::IntoResponse,
-    routing::get,
+    response::{Html, IntoResponse, Redirect},
+    routing::{get, post},
+    Json, Router,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use futures_util::TryStreamExt;
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -29,11 +29,12 @@ type HmacSha256 = Hmac<Sha256>;
 #[derive(Clone)]
 struct AppState {
     client: Client,
-    config: Arc<Config>,
+    config_path: Arc<String>,
+    config: Arc<RwLock<Config>>,
     runtime: Arc<RwLock<RuntimeState>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Config {
     bind: Option<String>,
     public_base_url: Option<String>,
@@ -43,7 +44,7 @@ struct Config {
     sources: Vec<SourceConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct SourceConfig {
     name: String,
     url: String,
@@ -83,6 +84,35 @@ struct HealthResponse {
     source_errors: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AdminForm {
+    public_base_url: Option<String>,
+    refresh_minutes: Option<String>,
+    user_agent: Option<String>,
+    signing_secret: Option<String>,
+    source_name: Option<Vec<String>>,
+    source_url: Option<Vec<String>>,
+    source_enabled: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct AdminPageData {
+    public_base_url: String,
+    refresh_minutes: String,
+    user_agent: String,
+    signing_secret: String,
+    sources: Vec<AdminSourceView>,
+    status_message: String,
+    status_class: String,
+}
+
+#[derive(Serialize)]
+struct AdminSourceView {
+    name: String,
+    url: String,
+    enabled: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
@@ -104,7 +134,8 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         client,
-        config: Arc::new(config),
+        config_path: Arc::new(config_path),
+        config: Arc::new(RwLock::new(config)),
         runtime: Arc::new(RwLock::new(RuntimeState::default())),
     };
 
@@ -112,18 +143,23 @@ async fn main() -> anyhow::Result<()> {
     spawn_refresh_loop(state.clone());
 
     let app = Router::new()
+        .route("/", get(root))
         .route("/health", get(health))
         .route("/channels", get(channels))
         .route("/list.m3u", get(list_m3u))
         .route("/live/{id}", get(live))
         .route("/proxy/{id}", get(proxy))
+        .route("/admin", get(admin_page))
+        .route("/admin/save", post(save_admin))
         .with_state(state.clone());
 
-    let bind = state
-        .config
-        .bind
-        .clone()
-        .unwrap_or_else(|| "0.0.0.0:8787".to_string());
+    let bind = {
+        let config = state.config.read().await;
+        config
+            .bind
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0:8787".to_string())
+    };
     let addr: SocketAddr = bind.parse()?;
     let listener = TcpListener::bind(addr).await?;
     info!("listening on {}", addr);
@@ -142,24 +178,27 @@ fn init_tracing() {
 }
 
 fn spawn_refresh_loop(state: AppState) {
-    let minutes = state.config.refresh_minutes.unwrap_or(30).max(1);
     tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(minutes * 60));
-        interval.tick().await;
         loop {
-            interval.tick().await;
+            let minutes = {
+                let config = state.config.read().await;
+                config.refresh_minutes.unwrap_or(30).max(1)
+            };
+            time::sleep(Duration::from_secs(minutes * 60)).await;
             refresh_channels(&state).await;
         }
     });
 }
 
 async fn refresh_channels(state: &AppState) {
+    let config = state.config.read().await.clone();
+
     let mut channels = Vec::new();
     let mut by_id = HashMap::new();
     let mut errors = BTreeMap::new();
     let mut seen_keys = HashSet::new();
 
-    for source in &state.config.sources {
+    for source in &config.sources {
         if source.enabled == Some(false) {
             continue;
         }
@@ -311,6 +350,10 @@ fn build_channel_id(source_name: &str, channel_name: &str, upstream_url: &str) -
     format!("{}-{}", slug, &short[..10])
 }
 
+async fn root() -> impl IntoResponse {
+    Redirect::to("/admin")
+}
+
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let runtime = state.runtime.read().await;
     Json(HealthResponse {
@@ -332,19 +375,19 @@ async fn list_m3u(
     uri: Uri,
 ) -> impl IntoResponse {
     let runtime = state.runtime.read().await;
-    let base = public_base_url(&state.config, &headers, &uri);
+    let base = public_base_url(&state, &headers, &uri).await;
 
     let mut body = String::from("#EXTM3U\n");
     for channel in &runtime.channels {
         body.push_str("#EXTINF:-1");
         if let Some(tvg_id) = &channel.tvg_id {
-            body.push_str(&format!(r#" tvg-id="{}""#, tvg_id));
+            body.push_str(&format!(r#" tvg-id=\"{}\""#, tvg_id));
         }
         if let Some(tvg_logo) = &channel.tvg_logo {
-            body.push_str(&format!(r#" tvg-logo="{}""#, tvg_logo));
+            body.push_str(&format!(r#" tvg-logo=\"{}\""#, tvg_logo));
         }
         body.push_str(&format!(
-            r#" group-title="{}" source-name="{}""#,
+            r#" group-title=\"{}\" source-name=\"{}\""#,
             channel.group, channel.source_name
         ));
         body.push_str(&format!(",{}\n", channel.name));
@@ -381,7 +424,8 @@ async fn proxy(
     headers: HeaderMap,
     uri: Uri,
 ) -> Result<Response<Body>, AppError> {
-    verify_signature(&state.config.signing_secret, &query.u, &query.s)?;
+    let config = state.config.read().await.clone();
+    verify_signature(&config.signing_secret, &query.u, &query.s)?;
     proxy_upstream(&state, &id, &query.u, &headers, &uri).await
 }
 
@@ -409,10 +453,11 @@ async fn proxy_upstream(
 
     if looks_like_m3u(content_type, final_url.path()) {
         let text = upstream.text().await.map_err(AppError::bad_gateway)?;
+        let config = state.config.read().await.clone();
         let rewritten = rewrite_playlist(
-            &state.config,
+            &config,
             channel_id,
-            &public_base_url(&state.config, headers, uri),
+            &public_base_url(state, headers, uri).await,
             &final_url,
             &text,
         )?;
@@ -439,6 +484,139 @@ async fn proxy_upstream(
             .insert(axum::http::header::CONTENT_TYPE, value);
     }
     Ok(response)
+}
+
+async fn admin_page(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Html<String>, AppError> {
+    let config = state.config.read().await.clone();
+    let status = query.get("status").map(String::as_str).unwrap_or("");
+    let (status_message, status_class) = match status {
+        "saved" => ("保存成功，已自动刷新频道列表。", "ok"),
+        "error" => ("保存失败，请检查输入内容后重试。", "error"),
+        _ => ("", ""),
+    };
+
+    let data = AdminPageData {
+        public_base_url: config.public_base_url.unwrap_or_default(),
+        refresh_minutes: config
+            .refresh_minutes
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "30".to_string()),
+        user_agent: config
+            .user_agent
+            .unwrap_or_else(|| "home-iptv-proxy/0.1".to_string()),
+        signing_secret: config.signing_secret,
+        sources: if config.sources.is_empty() {
+            vec![AdminSourceView {
+                name: "source-1".to_string(),
+                url: String::new(),
+                enabled: true,
+            }]
+        } else {
+            config
+                .sources
+                .into_iter()
+                .map(|source| AdminSourceView {
+                    name: source.name,
+                    url: source.url,
+                    enabled: source.enabled != Some(false),
+                })
+                .collect()
+        },
+        status_message: status_message.to_string(),
+        status_class: status_class.to_string(),
+    };
+
+    let html = render_admin_page(data)?;
+    Ok(Html(html))
+}
+
+async fn save_admin(
+    State(state): State<AppState>,
+    Form(form): Form<AdminForm>,
+) -> Result<Redirect, AppError> {
+    let source_names = form.source_name.unwrap_or_default();
+    let source_urls = form.source_url.unwrap_or_default();
+    let enabled_flags = form.source_enabled.unwrap_or_default();
+
+    let mut sources = Vec::new();
+    let row_count = source_names.len().max(source_urls.len());
+    for idx in 0..row_count {
+        let name = source_names
+            .get(idx)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let url = source_urls
+            .get(idx)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+
+        if name.is_empty() && url.is_empty() {
+            continue;
+        }
+        if url.is_empty() {
+            return Err(AppError::bad_request("有订阅源缺少地址"));
+        }
+
+        let enabled = enabled_flags.iter().any(|value| value == &idx.to_string());
+        sources.push(SourceConfig {
+            name: if name.is_empty() {
+                format!("source-{}", idx + 1)
+            } else {
+                name
+            },
+            url,
+            enabled: Some(enabled),
+        });
+    }
+
+    let refresh_minutes = form
+        .refresh_minutes
+        .as_deref()
+        .unwrap_or("30")
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| AppError::bad_request("刷新间隔必须是数字"))?;
+
+    let signing_secret = form.signing_secret.unwrap_or_default().trim().to_string();
+    if signing_secret.is_empty() {
+        return Err(AppError::bad_request("签名密钥不能为空"));
+    }
+
+    let new_config = Config {
+        bind: Some("0.0.0.0:8787".to_string()),
+        public_base_url: clean_optional(form.public_base_url),
+        refresh_minutes: Some(refresh_minutes.max(1)),
+        user_agent: clean_optional(form.user_agent),
+        signing_secret,
+        sources,
+    };
+
+    let yaml = serde_yaml::to_string(&new_config).map_err(AppError::internal)?;
+    tokio::fs::write(&*state.config_path, yaml)
+        .await
+        .map_err(AppError::internal)?;
+
+    {
+        let mut config = state.config.write().await;
+        *config = new_config;
+    }
+
+    refresh_channels(&state).await;
+    Ok(Redirect::to("/admin?status=saved"))
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn looks_like_m3u(content_type: &str, path: &str) -> bool {
@@ -539,7 +717,8 @@ fn verify_signature(secret: &str, target: &str, signature: &str) -> Result<(), A
     }
 }
 
-fn public_base_url(config: &Config, headers: &HeaderMap, uri: &Uri) -> String {
+async fn public_base_url(state: &AppState, headers: &HeaderMap, uri: &Uri) -> String {
+    let config = state.config.read().await;
     if let Some(base) = &config.public_base_url {
         return base.trim_end_matches('/').to_string();
     }
@@ -562,6 +741,356 @@ fn public_base_url(config: &Config, headers: &HeaderMap, uri: &Uri) -> String {
     format!("{proto}://{}", host.trim_end_matches('/'))
 }
 
+fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
+    let sources_json = serde_json::to_string(&data.sources).map_err(AppError::internal)?;
+    let status_block = if data.status_message.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<div class=\"notice {class}\">{message}</div>"#,
+            class = escape_html(&data.status_class),
+            message = escape_html(&data.status_message)
+        )
+    };
+
+    Ok(format!(
+        r#"<!DOCTYPE html>
+<html lang=\"zh-CN\">
+<head>
+  <meta charset=\"utf-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <title>home-iptv-proxy 后台</title>
+  <style>
+    :root {{
+      --bg: #f5efe4;
+      --panel: #fffdf8;
+      --line: #d9ccb7;
+      --ink: #2b241c;
+      --muted: #746759;
+      --accent: #c76b32;
+      --accent-dark: #9d4f20;
+      --ok: #e6f5ea;
+      --ok-line: #94c7a2;
+      --error: #fdebea;
+      --error-line: #dd8f89;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: \"PingFang SC\", \"Noto Sans SC\", \"Microsoft YaHei\", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, #fff7ed 0, transparent 35%),
+        linear-gradient(180deg, #f9f3e8 0%, var(--bg) 100%);
+    }}
+    .shell {{
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }}
+    .hero {{
+      display: grid;
+      gap: 10px;
+      margin-bottom: 22px;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: clamp(28px, 5vw, 42px);
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+    }}
+    .sub {{
+      color: var(--muted);
+      font-size: 15px;
+    }}
+    .panel {{
+      background: rgba(255, 253, 248, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 18px 60px rgba(79, 51, 24, 0.09);
+      overflow: hidden;
+    }}
+    .panel-head {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 20px 22px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(135deg, rgba(199, 107, 50, 0.12), rgba(255,255,255,0));
+    }}
+    .panel-title {{
+      font-size: 18px;
+      font-weight: 700;
+    }}
+    .panel-body {{
+      padding: 22px;
+    }}
+    .grid {{
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-bottom: 18px;
+    }}
+    .field {{
+      display: grid;
+      gap: 8px;
+    }}
+    .field.full {{
+      grid-column: 1 / -1;
+    }}
+    label {{
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }}
+    input {{
+      width: 100%;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-size: 15px;
+      color: var(--ink);
+      outline: none;
+    }}
+    input:focus {{
+      border-color: var(--accent);
+      box-shadow: 0 0 0 4px rgba(199, 107, 50, 0.12);
+    }}
+    .sources {{
+      display: grid;
+      gap: 14px;
+      margin-top: 10px;
+    }}
+    .source-card {{
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 18px;
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }}
+    .source-top {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }}
+    .source-badge {{
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+    .source-grid {{
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 220px 1fr;
+    }}
+    .toggle {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: var(--ink);
+    }}
+    .toggle input {{
+      width: 18px;
+      height: 18px;
+      margin: 0;
+    }}
+    .actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 22px;
+    }}
+    button {{
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform .15s ease, opacity .15s ease, background .15s ease;
+    }}
+    button:hover {{ transform: translateY(-1px); }}
+    .primary {{
+      background: var(--accent);
+      color: #fff;
+    }}
+    .primary:hover {{
+      background: var(--accent-dark);
+    }}
+    .ghost {{
+      background: #efe3d1;
+      color: var(--ink);
+    }}
+    .danger {{
+      background: #f7dfdc;
+      color: #7e3029;
+    }}
+    .notice {{
+      margin-bottom: 18px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      font-size: 14px;
+      font-weight: 600;
+    }}
+    .notice.ok {{
+      background: var(--ok);
+      border: 1px solid var(--ok-line);
+    }}
+    .notice.error {{
+      background: var(--error);
+      border: 1px solid var(--error-line);
+    }}
+    .footer-note {{
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    @media (max-width: 760px) {{
+      .grid, .source-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .panel-head {{
+        align-items: flex-start;
+        flex-direction: column;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class=\"shell\">
+    <div class=\"hero\">
+      <h1>订阅中转后台</h1>
+      <div class=\"sub\">在这里维护上游 m3u 地址，保存后会自动刷新，本地订阅地址保持不变。</div>
+    </div>
+    <div class=\"panel\">
+      <div class=\"panel-head\">
+        <div>
+          <div class=\"panel-title\">源地址管理</div>
+          <div class=\"sub\">本地播放地址：<code>/list.m3u</code></div>
+        </div>
+      </div>
+      <div class=\"panel-body\">
+        {status_block}
+        <form method=\"post\" action=\"/admin/save\">
+          <div class=\"grid\">
+            <div class=\"field\">
+              <label for=\"public_base_url\">外部访问地址（可选）</label>
+              <input id=\"public_base_url\" name=\"public_base_url\" value=\"{public_base_url}\" placeholder=\"例如 https://tv.example.com\">
+            </div>
+            <div class=\"field\">
+              <label for=\"refresh_minutes\">刷新间隔（分钟）</label>
+              <input id=\"refresh_minutes\" name=\"refresh_minutes\" value=\"{refresh_minutes}\" inputmode=\"numeric\">
+            </div>
+            <div class=\"field\">
+              <label for=\"user_agent\">请求标识</label>
+              <input id=\"user_agent\" name=\"user_agent\" value=\"{user_agent}\">
+            </div>
+            <div class=\"field\">
+              <label for=\"signing_secret\">签名密钥</label>
+              <input id=\"signing_secret\" name=\"signing_secret\" value=\"{signing_secret}\">
+            </div>
+          </div>
+
+          <div class=\"panel-title\">M3U 源列表</div>
+          <div class=\"sources\" id=\"sources\"></div>
+
+          <div class=\"actions\">
+            <button class=\"ghost\" type=\"button\" id=\"add-source\">新增一条源地址</button>
+            <button class=\"primary\" type=\"submit\">保存并刷新</button>
+          </div>
+        </form>
+        <div class=\"footer-note\">保存后会直接写入服务器配置文件，并重新抓取频道列表。</div>
+      </div>
+    </div>
+  </div>
+
+  <template id=\"source-template\">
+    <div class=\"source-card\">
+      <div class=\"source-top\">
+        <div class=\"source-badge\">Source</div>
+        <button class=\"danger remove-source\" type=\"button\">删除</button>
+      </div>
+      <div class=\"source-grid\">
+        <div class=\"field\">
+          <label>名称</label>
+          <input data-role=\"name\" name=\"source_name\" placeholder=\"例如 客厅主源\">
+        </div>
+        <div class=\"field\">
+          <label>m3u 地址</label>
+          <input data-role=\"url\" name=\"source_url\" placeholder=\"https://example.com/live.m3u\">
+        </div>
+      </div>
+      <label class=\"toggle\">
+        <input data-role=\"enabled\" type=\"checkbox\" name=\"source_enabled\">
+        启用这条源
+      </label>
+    </div>
+  </template>
+
+  <script>
+    const initialSources = {sources_json};
+    const container = document.getElementById("sources");
+    const template = document.getElementById("source-template");
+    const addButton = document.getElementById("add-source");
+
+    function refreshIndexes() {{
+      [...container.querySelectorAll(".source-card")].forEach((card, index) => {{
+        card.querySelector(".source-badge").textContent = "Source " + (index + 1);
+        card.querySelector('[data-role="enabled"]').value = String(index);
+      }});
+    }}
+
+    function addSourceRow(source = {{ name: "", url: "", enabled: true }}) {{
+      const node = template.content.firstElementChild.cloneNode(true);
+      node.querySelector('[data-role="name"]').value = source.name || "";
+      node.querySelector('[data-role="url"]').value = source.url || "";
+      node.querySelector('[data-role="enabled"]').checked = source.enabled !== false;
+      node.querySelector(".remove-source").addEventListener("click", () => {{
+        node.remove();
+        if (!container.children.length) {{
+          addSourceRow();
+        }}
+        refreshIndexes();
+      }});
+      container.appendChild(node);
+      refreshIndexes();
+    }}
+
+    if (initialSources.length) {{
+      initialSources.forEach(addSourceRow);
+    }} else {{
+      addSourceRow();
+    }}
+
+    addButton.addEventListener("click", () => addSourceRow());
+  </script>
+</body>
+</html>"#,
+        status_block = status_block,
+        public_base_url = escape_html(&data.public_base_url),
+        refresh_minutes = escape_html(&data.refresh_minutes),
+        user_agent = escape_html(&data.user_agent),
+        signing_secret = escape_html(&data.signing_secret),
+        sources_json = sources_json
+    ))
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 struct AppError {
     status: StatusCode,
     message: String,
@@ -582,9 +1111,23 @@ impl AppError {
         }
     }
 
+    fn bad_request(message: &str) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.to_string(),
+        }
+    }
+
     fn bad_gateway(err: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
+            message: err.to_string(),
+        }
+    }
+
+    fn internal(err: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
             message: err.to_string(),
         }
     }
