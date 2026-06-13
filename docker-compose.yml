@@ -1,0 +1,11 @@
+services:
+  home-iptv-proxy:
+    build: .
+    container_name: home-iptv-proxy
+    restart: always
+    ports:
+      - "28787:8787"
+    volumes:
+      - ./config:/app/config
+    environment:
+      IPTV_CONFIG: /app/config/sources.yaml
