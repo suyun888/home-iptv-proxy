@@ -1,0 +1,12 @@
+bind: 0.0.0.0:8787
+public_base_url: null
+refresh_minutes: 30
+user_agent: "home-iptv-proxy/0.1"
+signing_secret: "change-this-secret"
+sources:
+  - name: "source-a"
+    url: "https://example.com/playlist-a.m3u"
+    enabled: true
+  - name: "source-b"
+    url: "https://example.com/playlist-b.m3u"
+    enabled: false
