@@ -1,6 +1,6 @@
 FROM rust:1.94 AS builder
 WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY src ./src
 RUN cargo build --release
 
