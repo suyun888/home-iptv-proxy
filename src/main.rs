@@ -381,13 +381,13 @@ async fn list_m3u(
     for channel in &runtime.channels {
         body.push_str("#EXTINF:-1");
         if let Some(tvg_id) = &channel.tvg_id {
-            body.push_str(&format!(r#" tvg-id=\"{}\""#, tvg_id));
+            body.push_str(&format!(r#" tvg-id="{}""#, tvg_id));
         }
         if let Some(tvg_logo) = &channel.tvg_logo {
-            body.push_str(&format!(r#" tvg-logo=\"{}\""#, tvg_logo));
+            body.push_str(&format!(r#" tvg-logo="{}""#, tvg_logo));
         }
         body.push_str(&format!(
-            r#" group-title=\"{}\" source-name=\"{}\""#,
+            r#" group-title="{}" source-name="{}""#,
             channel.group, channel.source_name
         ));
         body.push_str(&format!(",{}\n", channel.name));
@@ -747,7 +747,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         String::new()
     } else {
         format!(
-            r#"<div class=\"notice {class}\">{message}</div>"#,
+            r#"<div class="notice {class}">{message}</div>"#,
             class = escape_html(&data.status_class),
             message = escape_html(&data.status_message)
         )
@@ -755,10 +755,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 
     Ok(format!(
         r#"<!DOCTYPE html>
-<html lang=\"zh-CN\">
+<html lang="zh-CN">
 <head>
-  <meta charset=\"utf-8\">
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>home-iptv-proxy 后台</title>
   <style>
     :root {{
@@ -777,7 +777,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      font-family: \"PingFang SC\", \"Noto Sans SC\", \"Microsoft YaHei\", sans-serif;
+      font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
       color: var(--ink);
       background:
         radial-gradient(circle at top left, #fff7ed 0, transparent 35%),
@@ -965,71 +965,71 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
   </style>
 </head>
 <body>
-  <div class=\"shell\">
-    <div class=\"hero\">
+  <div class="shell">
+    <div class="hero">
       <h1>订阅中转后台</h1>
-      <div class=\"sub\">在这里维护上游 m3u 地址，保存后会自动刷新，本地订阅地址保持不变。</div>
+      <div class="sub">在这里维护上游 m3u 地址，保存后会自动刷新，本地订阅地址保持不变。</div>
     </div>
-    <div class=\"panel\">
-      <div class=\"panel-head\">
+    <div class="panel">
+      <div class="panel-head">
         <div>
-          <div class=\"panel-title\">源地址管理</div>
-          <div class=\"sub\">本地播放地址：<code>/list.m3u</code></div>
+          <div class="panel-title">源地址管理</div>
+          <div class="sub">本地播放地址：<code>/list.m3u</code></div>
         </div>
       </div>
-      <div class=\"panel-body\">
+      <div class="panel-body">
         {status_block}
-        <form method=\"post\" action=\"/admin/save\">
-          <div class=\"grid\">
-            <div class=\"field\">
-              <label for=\"public_base_url\">外部访问地址（可选）</label>
-              <input id=\"public_base_url\" name=\"public_base_url\" value=\"{public_base_url}\" placeholder=\"例如 https://tv.example.com\">
+        <form method="post" action="/admin/save">
+          <div class="grid">
+            <div class="field">
+              <label for="public_base_url">外部访问地址（可选）</label>
+              <input id="public_base_url" name="public_base_url" value="{public_base_url}" placeholder="例如 https://tv.example.com">
             </div>
-            <div class=\"field\">
-              <label for=\"refresh_minutes\">刷新间隔（分钟）</label>
-              <input id=\"refresh_minutes\" name=\"refresh_minutes\" value=\"{refresh_minutes}\" inputmode=\"numeric\">
+            <div class="field">
+              <label for="refresh_minutes">刷新间隔（分钟）</label>
+              <input id="refresh_minutes" name="refresh_minutes" value="{refresh_minutes}" inputmode="numeric">
             </div>
-            <div class=\"field\">
-              <label for=\"user_agent\">请求标识</label>
-              <input id=\"user_agent\" name=\"user_agent\" value=\"{user_agent}\">
+            <div class="field">
+              <label for="user_agent">请求标识</label>
+              <input id="user_agent" name="user_agent" value="{user_agent}">
             </div>
-            <div class=\"field\">
-              <label for=\"signing_secret\">签名密钥</label>
-              <input id=\"signing_secret\" name=\"signing_secret\" value=\"{signing_secret}\">
+            <div class="field">
+              <label for="signing_secret">签名密钥</label>
+              <input id="signing_secret" name="signing_secret" value="{signing_secret}">
             </div>
           </div>
 
-          <div class=\"panel-title\">M3U 源列表</div>
-          <div class=\"sources\" id=\"sources\"></div>
+          <div class="panel-title">M3U 源列表</div>
+          <div class="sources" id="sources"></div>
 
-          <div class=\"actions\">
-            <button class=\"ghost\" type=\"button\" id=\"add-source\">新增一条源地址</button>
-            <button class=\"primary\" type=\"submit\">保存并刷新</button>
+          <div class="actions">
+            <button class="ghost" type="button" id="add-source">新增一条源地址</button>
+            <button class="primary" type="submit">保存并刷新</button>
           </div>
         </form>
-        <div class=\"footer-note\">保存后会直接写入服务器配置文件，并重新抓取频道列表。</div>
+        <div class="footer-note">保存后会直接写入服务器配置文件，并重新抓取频道列表。</div>
       </div>
     </div>
   </div>
 
-  <template id=\"source-template\">
-    <div class=\"source-card\">
-      <div class=\"source-top\">
-        <div class=\"source-badge\">Source</div>
-        <button class=\"danger remove-source\" type=\"button\">删除</button>
+  <template id="source-template">
+    <div class="source-card">
+      <div class="source-top">
+        <div class="source-badge">Source</div>
+        <button class="danger remove-source" type="button">删除</button>
       </div>
-      <div class=\"source-grid\">
-        <div class=\"field\">
+      <div class="source-grid">
+        <div class="field">
           <label>名称</label>
-          <input data-role=\"name\" name=\"source_name\" placeholder=\"例如 客厅主源\">
+          <input data-role="name" name="source_name" placeholder="例如 客厅主源">
         </div>
-        <div class=\"field\">
+        <div class="field">
           <label>m3u 地址</label>
-          <input data-role=\"url\" name=\"source_url\" placeholder=\"https://example.com/live.m3u\">
+          <input data-role="url" name="source_url" placeholder="https://example.com/live.m3u">
         </div>
       </div>
-      <label class=\"toggle\">
-        <input data-role=\"enabled\" type=\"checkbox\" name=\"source_enabled\">
+      <label class="toggle">
+        <input data-role="enabled" type="checkbox" name="source_enabled">
         启用这条源
       </label>
     </div>
