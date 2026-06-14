@@ -99,7 +99,23 @@ struct RuntimeState {
     channels: Vec<Channel>,
     by_id: HashMap<String, Channel>,
     source_errors: BTreeMap<String, String>,
+    source_stats: Vec<SourceRuntimeStat>,
     last_refresh_ok: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SourceRuntimeStat {
+    name: String,
+    url: String,
+    enabled: bool,
+    channel_count: usize,
+    refresh_latency_ms: Option<u64>,
+    last_status: String,
+    last_error: String,
+    last_refresh_at: String,
+    access_mode: String,
+    proxy_target: String,
+    proxy_region: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -210,6 +226,8 @@ struct AdminPageData {
     recordings_dir: String,
     signing_secret: String,
     sources: Vec<AdminSourceView>,
+    source_statuses_json: String,
+    channel_statuses_json: String,
     channels_json: String,
     recordings_json: String,
     status_message: String,
@@ -227,6 +245,32 @@ struct AdminSourceView {
     url: String,
     proxy_url: String,
     enabled: bool,
+}
+
+#[derive(Serialize)]
+struct AdminChannelStatusView {
+    id: String,
+    name: String,
+    group: String,
+    source_name: String,
+    upstream_host: String,
+    access_mode: String,
+    proxy_region: String,
+    refresh_latency_ms: u64,
+    last_status: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GeoLookupResponse {
+    success: bool,
+    country: Option<String>,
+    region: Option<String>,
+    city: Option<String>,
+}
+
+struct FetchSourceResult {
+    channels: Vec<Channel>,
+    latency_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -327,6 +371,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/xhs/apply", post(apply_xhs_credentials))
         .route("/admin", get(admin_page))
         .route("/admin/save", post(save_admin))
+        .route("/admin/refresh", post(refresh_now))
         .route("/admin/update", post(run_manual_update))
         .with_state(state.clone());
 
@@ -378,6 +423,104 @@ fn xhs_env_path_from_config(config_path: &str) -> PathBuf {
     dir.join("xhsuhd.env")
 }
 
+fn format_now_local() -> String {
+    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn parse_proxy_target(proxy_url: Option<&str>) -> String {
+    let Some(value) = proxy_url.filter(|value| !value.trim().is_empty()) else {
+        return "-".to_string();
+    };
+    Url::parse(value)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn is_local_host(host: &str) -> bool {
+    let lower = host.trim().to_ascii_lowercase();
+    if matches!(lower.as_str(), "localhost" | "127.0.0.1" | "::1") {
+        return true;
+    }
+    if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(ipv4) => {
+                ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local()
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                ipv6.is_loopback() || ipv6.is_unique_local() || ipv6.is_unicast_link_local()
+            }
+        };
+    }
+    false
+}
+
+async fn resolve_proxy_region(client: &Client, proxy_url: Option<&str>) -> String {
+    let target = parse_proxy_target(proxy_url);
+    if target == "-" {
+        return "本地出口".to_string();
+    }
+    if is_local_host(&target) {
+        return "局域网".to_string();
+    }
+
+    let lookup_url = format!("https://ipwho.is/{}", target);
+    let request = async {
+        let response = client
+            .get(lookup_url)
+            .send()
+            .await
+            .map_err(AppError::bad_gateway)?
+            .error_for_status()
+            .map_err(AppError::bad_gateway)?;
+        response
+            .json::<GeoLookupResponse>()
+            .await
+            .map_err(AppError::bad_gateway)
+    };
+
+    let body = match time::timeout(Duration::from_secs(2), request).await {
+        Ok(result) => match result {
+            Ok(payload) => payload,
+            Err(_) => return "未知".to_string(),
+        },
+        Err(_) => return "未知".to_string(),
+    };
+
+    if !body.success {
+        return "未知".to_string();
+    }
+
+    let mut parts = Vec::new();
+    if let Some(country) = body.country.filter(|value| !value.trim().is_empty()) {
+        parts.push(country);
+    }
+    if let Some(region) = body.region.filter(|value| !value.trim().is_empty()) {
+        parts.push(region);
+    }
+    if let Some(city) = body.city.filter(|value| !value.trim().is_empty()) {
+        parts.push(city);
+    }
+    if parts.is_empty() {
+        "未知".to_string()
+    } else {
+        parts.join(" / ")
+    }
+}
+
+async fn describe_access_mode(
+    client: &Client,
+    proxy_url: Option<&str>,
+) -> (String, String, String) {
+    let target = parse_proxy_target(proxy_url);
+    if proxy_url.is_some() && target != "-" {
+        let region = resolve_proxy_region(client, proxy_url).await;
+        ("代理".to_string(), target, region)
+    } else {
+        ("直连".to_string(), "-".to_string(), "本地出口".to_string())
+    }
+}
+
 fn default_version_check_url(app_image: &str) -> Option<String> {
     let trimmed = app_image.trim();
     let image = trimmed.strip_prefix("ghcr.io/")?;
@@ -387,6 +530,31 @@ fn default_version_check_url(app_image: &str) -> Option<String> {
     Some(format!(
         "https://raw.githubusercontent.com/{owner}/{repo}/main/Cargo.toml"
     ))
+}
+
+fn source_fetch_candidates(source_url: &str) -> Vec<String> {
+    let mut candidates = vec![source_url.to_string()];
+    let Ok(url) = Url::parse(source_url) else {
+        return candidates;
+    };
+    if url.host_str() != Some("raw.githubusercontent.com") {
+        return candidates;
+    }
+    let segments = url
+        .path_segments()
+        .map(|parts| parts.map(str::to_string).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if segments.len() < 4 {
+        return candidates;
+    }
+    let owner = &segments[0];
+    let repo = &segments[1];
+    let branch = &segments[2];
+    let path = segments[3..].join("/");
+    candidates.push(format!(
+        "https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"
+    ));
+    candidates
 }
 
 fn parse_version_from_cargo_toml(body: &str) -> Option<String> {
@@ -482,30 +650,79 @@ async fn refresh_channels(state: &AppState) {
     let mut channels = Vec::new();
     let mut by_id = HashMap::new();
     let mut errors = BTreeMap::new();
+    let mut source_stats = Vec::new();
     let mut seen_keys = HashSet::new();
+    let user_agent = config
+        .user_agent
+        .clone()
+        .unwrap_or_else(|| "home-iptv-proxy/0.1".to_string());
 
     for source in &config.sources {
-        if source.enabled == Some(false) {
+        let enabled = source.enabled != Some(false);
+        let (access_mode, proxy_target, proxy_region) =
+            describe_access_mode(&state.client, source.proxy_url.as_deref()).await;
+        if !enabled {
+            source_stats.push(SourceRuntimeStat {
+                name: source.name.clone(),
+                url: source.url.clone(),
+                enabled: false,
+                channel_count: 0,
+                refresh_latency_ms: None,
+                last_status: "已禁用".to_string(),
+                last_error: String::new(),
+                last_refresh_at: format_now_local(),
+                access_mode,
+                proxy_target,
+                proxy_region,
+            });
             continue;
         }
 
-        let user_agent = config
-            .user_agent
-            .clone()
-            .unwrap_or_else(|| "home-iptv-proxy/0.1".to_string());
         match fetch_source_channels(&state.client, source, &user_agent).await {
-            Ok(found) => {
-                for channel in found {
+            Ok(result) => {
+                let mut unique_count = 0usize;
+                for channel in result.channels {
                     let dedupe_key = format!("{}|{}", channel.name, channel.upstream_url);
                     if seen_keys.insert(dedupe_key) {
                         by_id.insert(channel.id.clone(), channel.clone());
                         channels.push(channel);
+                        unique_count += 1;
                     }
                 }
+                source_stats.push(SourceRuntimeStat {
+                    name: source.name.clone(),
+                    url: source.url.clone(),
+                    enabled: true,
+                    channel_count: unique_count,
+                    refresh_latency_ms: Some(result.latency_ms),
+                    last_status: if unique_count > 0 {
+                        "正常".to_string()
+                    } else {
+                        "已抓取但无频道".to_string()
+                    },
+                    last_error: String::new(),
+                    last_refresh_at: format_now_local(),
+                    access_mode,
+                    proxy_target,
+                    proxy_region,
+                });
             }
             Err(err) => {
                 warn!("source {} refresh failed: {}", source.name, err);
                 errors.insert(source.name.clone(), err.to_string());
+                source_stats.push(SourceRuntimeStat {
+                    name: source.name.clone(),
+                    url: source.url.clone(),
+                    enabled: true,
+                    channel_count: 0,
+                    refresh_latency_ms: None,
+                    last_status: "抓取失败".to_string(),
+                    last_error: err.to_string(),
+                    last_refresh_at: format_now_local(),
+                    access_mode,
+                    proxy_target,
+                    proxy_region,
+                });
             }
         }
     }
@@ -517,6 +734,7 @@ async fn refresh_channels(state: &AppState) {
     runtime.channels = channels;
     runtime.by_id = by_id;
     runtime.source_errors = errors;
+    runtime.source_stats = source_stats;
     runtime.last_refresh_ok = last_refresh_ok;
 }
 
@@ -524,18 +742,50 @@ async fn fetch_source_channels(
     client: &Client,
     source: &SourceConfig,
     user_agent: &str,
-) -> anyhow::Result<Vec<Channel>> {
+) -> anyhow::Result<FetchSourceResult> {
     let client = match proxied_client(client, source.proxy_url.as_deref(), user_agent) {
         Ok(client) => client,
         Err(err) => return Err(anyhow::anyhow!(err.message)),
     };
-    let text = client
-        .get(&source.url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut text = String::new();
+    let mut latency_ms = 0u64;
+    let candidates = source_fetch_candidates(&source.url);
+    'fetch: for candidate in candidates {
+        for attempt in 0..3 {
+            let start = std::time::Instant::now();
+            match client
+                .get(&candidate)
+                .timeout(Duration::from_secs(35))
+                .send()
+                .await
+            {
+                Ok(response) => match response.error_for_status() {
+                    Ok(response) => match response.text().await {
+                        Ok(body) => {
+                            latency_ms = start.elapsed().as_millis() as u64;
+                            text = body;
+                            last_error = None;
+                            break 'fetch;
+                        }
+                        Err(err) => last_error = Some(anyhow::anyhow!(err)),
+                    },
+                    Err(err) => last_error = Some(anyhow::anyhow!(err)),
+                },
+                Err(err) => last_error = Some(anyhow::anyhow!(err)),
+            }
+
+            if attempt < 2 {
+                time::sleep(Duration::from_millis(600 * (attempt as u64 + 1))).await;
+            }
+        }
+    }
+    if let Some(err) = last_error {
+        if text.is_empty() {
+            return Err(err);
+        }
+    }
+
     let mut channels = Vec::new();
     let mut pending_meta: Option<M3uMeta> = None;
 
@@ -574,7 +824,10 @@ async fn fetch_source_channels(
         });
     }
 
-    Ok(channels)
+    Ok(FetchSourceResult {
+        channels,
+        latency_ms,
+    })
 }
 
 #[derive(Default)]
@@ -1247,6 +1500,17 @@ async fn list_m3u(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/x-mpegURL; charset=utf-8"),
     );
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::PRAGMA,
+        HeaderValue::from_static("no-cache"),
+    );
+    response
+        .headers_mut()
+        .insert(axum::http::header::EXPIRES, HeaderValue::from_static("0"));
     response
 }
 
@@ -1444,8 +1708,12 @@ async fn admin_page(
     let status = query.get("status").map(String::as_str).unwrap_or("");
     let (status_message, status_class) = match status {
         "saved" => ("保存成功，已自动刷新频道列表。", "ok"),
+        "refreshed" => ("已重新抓取全部直播源，频道列表和诊断信息都已更新。", "ok"),
         "saved_xhs_applied" => ("保存成功，并已把 xhsuhd 凭证应用到上游容器。", "ok"),
-        "saved_xhs_pending" => ("保存成功，xhsuhd 凭证已写入配置，但当前部署未启用一键应用。", "ok"),
+        "saved_xhs_pending" => (
+            "保存成功，xhsuhd 凭证已写入配置，但当前部署未启用一键应用。",
+            "ok",
+        ),
         "updated" => ("手动更新命令已执行完成，容器重启后版本号会自动刷新。", "ok"),
         "update_error" => ("手动更新失败，请查看容器日志确认原因。", "error"),
         "xhs_applied" => ("xhsuhd 凭证已重新应用，失效后可在这里直接替换。", "ok"),
@@ -1463,6 +1731,46 @@ async fn admin_page(
                 name: channel.name.clone(),
                 tvg_id: channel.tvg_id.clone().unwrap_or_default(),
                 source_name: channel.source_name.clone(),
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(AppError::internal)?;
+    let source_statuses_json =
+        serde_json::to_string(&runtime.source_stats).map_err(AppError::internal)?;
+    let source_stats_by_name = runtime
+        .source_stats
+        .iter()
+        .map(|item| (item.name.clone(), item.clone()))
+        .collect::<HashMap<_, _>>();
+    let channel_statuses_json = serde_json::to_string(
+        &runtime
+            .channels
+            .iter()
+            .map(|channel| {
+                let source_stat = source_stats_by_name.get(&channel.source_name);
+                let upstream_host = Url::parse(&channel.upstream_url)
+                    .ok()
+                    .and_then(|url| url.host_str().map(str::to_string))
+                    .unwrap_or_else(|| "-".to_string());
+                AdminChannelStatusView {
+                    id: channel.id.clone(),
+                    name: channel.name.clone(),
+                    group: channel.group.clone(),
+                    source_name: channel.source_name.clone(),
+                    upstream_host,
+                    access_mode: source_stat
+                        .map(|item| item.access_mode.clone())
+                        .unwrap_or_else(|| "直连".to_string()),
+                    proxy_region: source_stat
+                        .map(|item| item.proxy_region.clone())
+                        .unwrap_or_else(|| "本地出口".to_string()),
+                    refresh_latency_ms: source_stat
+                        .and_then(|item| item.refresh_latency_ms)
+                        .unwrap_or_default(),
+                    last_status: source_stat
+                        .map(|item| item.last_status.clone())
+                        .unwrap_or_else(|| "未知".to_string()),
+                }
             })
             .collect::<Vec<_>>(),
     )
@@ -1570,6 +1878,8 @@ async fn admin_page(
                 })
                 .collect()
         },
+        source_statuses_json,
+        channel_statuses_json,
         channels_json,
         recordings_json,
         status_message: status_message.to_string(),
@@ -1726,6 +2036,11 @@ async fn run_manual_update(State(state): State<AppState>) -> Result<Redirect, Ap
     }
 
     Ok(Redirect::to("/admin?status=updated"))
+}
+
+async fn refresh_now(State(state): State<AppState>) -> Result<Redirect, AppError> {
+    refresh_channels(&state).await;
+    Ok(Redirect::to("/admin?status=refreshed"))
 }
 
 async fn apply_xhs_credentials(State(state): State<AppState>) -> Result<Redirect, AppError> {
@@ -2231,6 +2546,66 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       color: var(--muted);
       font-size: 13px;
     }}
+    .diagnostics {{
+      display: grid;
+      gap: 14px;
+    }}
+    .diag-toolbar {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 14px;
+    }}
+    .diag-search {{
+      max-width: 320px;
+    }}
+    .diag-table-wrap {{
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #fff;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 880px;
+    }}
+    th, td {{
+      text-align: left;
+      padding: 11px 12px;
+      border-bottom: 1px solid #efe3d1;
+      font-size: 14px;
+      vertical-align: top;
+    }}
+    th {{
+      background: #fbf5ea;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }}
+    .tag {{
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #f3e6d4;
+      color: #70431e;
+    }}
+    .tag.ok {{
+      background: #e6f5ea;
+      color: #246d3d;
+    }}
+    .tag.error {{
+      background: #fdebea;
+      color: #9b3d36;
+    }}
     @media (max-width: 760px) {{
       .grid, .source-grid, .version-grid {{
         grid-template-columns: 1fr;
@@ -2340,11 +2715,60 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 
           <div class="actions">
             <button class="ghost" type="button" id="add-source">新增一条源地址</button>
+            <form class="inline" method="post" action="/admin/refresh"><button class="ghost" type="submit">立即重新抓源</button></form>
             <button class="primary" type="submit">保存并刷新</button>
             {xhs_apply_action}
           </div>
           <div class="footer-note">{xhs_apply_hint}</div>
         </form>
+
+        <div class="panel-title" style="margin-top:28px;">源抓取诊断</div>
+        <div class="sub">这里会直接告诉你每条源有没有抓到、抓到多少频道、耗时多少、是直连还是代理，以及代理出口地区。</div>
+        <div class="diagnostics" style="margin-top:14px;">
+          <div class="diag-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>源名称</th>
+                  <th>状态</th>
+                  <th>频道数</th>
+                  <th>耗时</th>
+                  <th>方式</th>
+                  <th>代理目标</th>
+                  <th>代理地区</th>
+                  <th>最后刷新</th>
+                  <th>错误</th>
+                </tr>
+              </thead>
+              <tbody id="source-status-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel-title" style="margin-top:28px;">整合频道总览</div>
+        <div class="sub">所有已经合并进本地订阅的频道都会列在这里，延迟显示的是所属源最近一次抓取耗时。</div>
+        <div class="diagnostics" style="margin-top:14px;">
+          <div class="diag-toolbar">
+            <input id="channel-diagnostics-search" class="diag-search" placeholder="搜索频道名 / 分组 / 来源">
+          </div>
+          <div class="diag-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>频道</th>
+                  <th>分组</th>
+                  <th>来源</th>
+                  <th>上游主机</th>
+                  <th>直连/代理</th>
+                  <th>代理地区</th>
+                  <th>延迟</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="channel-status-body"></tbody>
+            </table>
+          </div>
+        </div>
 
         <div class="panel-title" style="margin-top:28px;">节目单录制</div>
         <div class="grid">
@@ -2404,6 +2828,8 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 
   <script>
     const initialSources = {sources_json};
+    const sourceStatuses = {source_statuses_json};
+    const channelStatuses = {channel_statuses_json};
     const channels = {channels_json};
     const recordings = {recordings_json};
     const container = document.getElementById("sources");
@@ -2414,6 +2840,9 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     const timeline = document.getElementById("epg-timeline");
     const recordingList = document.getElementById("recording-list");
     const loadEpgButton = document.getElementById("load-epg");
+    const sourceStatusBody = document.getElementById("source-status-body");
+    const channelStatusBody = document.getElementById("channel-status-body");
+    const channelDiagnosticsSearch = document.getElementById("channel-diagnostics-search");
 
     function refreshIndexes() {{
       [...container.querySelectorAll(".source-card")].forEach((card, index) => {{
@@ -2446,6 +2875,62 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     }}
 
     addButton.addEventListener("click", () => addSourceRow());
+
+    function statusTag(label) {{
+      if (label === "正常") return '<span class="tag ok">' + label + '</span>';
+      if (label === "抓取失败") return '<span class="tag error">' + label + '</span>';
+      return '<span class="tag">' + label + '</span>';
+    }}
+
+    function renderSourceStatuses() {{
+      sourceStatusBody.innerHTML = "";
+      sourceStatuses.forEach((item) => {{
+        const row = document.createElement("tr");
+        row.innerHTML =
+          "<td>" + item.name + "</td>" +
+          "<td>" + statusTag(item.last_status) + "</td>" +
+          "<td>" + item.channel_count + "</td>" +
+          "<td>" + (item.refresh_latency_ms ? item.refresh_latency_ms + " ms" : "-") + "</td>" +
+          "<td>" + item.access_mode + "</td>" +
+          "<td>" + item.proxy_target + "</td>" +
+          "<td>" + item.proxy_region + "</td>" +
+          "<td>" + item.last_refresh_at + "</td>" +
+          "<td>" + (item.last_error || "-") + "</td>";
+        sourceStatusBody.appendChild(row);
+      }});
+    }}
+
+    function renderChannelStatuses(keyword = "") {{
+      const normalized = keyword.trim().toLowerCase();
+      channelStatusBody.innerHTML = "";
+      channelStatuses
+        .filter((item) => {{
+          if (!normalized) return true;
+          return [
+            item.name,
+            item.group,
+            item.source_name,
+            item.upstream_host
+          ].join(" ").toLowerCase().includes(normalized);
+        }})
+        .forEach((item) => {{
+          const row = document.createElement("tr");
+          row.innerHTML =
+            "<td>" + item.name + "</td>" +
+            "<td>" + item.group + "</td>" +
+            "<td>" + item.source_name + "</td>" +
+            "<td>" + item.upstream_host + "</td>" +
+            "<td>" + item.access_mode + "</td>" +
+            "<td>" + item.proxy_region + "</td>" +
+            "<td>" + (item.refresh_latency_ms ? item.refresh_latency_ms + " ms" : "-") + "</td>" +
+            "<td>" + statusTag(item.last_status) + "</td>";
+          channelStatusBody.appendChild(row);
+        }});
+    }}
+
+    renderSourceStatuses();
+    renderChannelStatuses();
+    channelDiagnosticsSearch.addEventListener("input", (event) => renderChannelStatuses(event.target.value));
 
     channels.forEach((channel) => {{
       const option = document.createElement("option");
@@ -2584,6 +3069,8 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         recordings_dir = escape_html(&data.recordings_dir),
         signing_secret = escape_html(&data.signing_secret),
         sources_json = sources_json,
+        source_statuses_json = data.source_statuses_json,
+        channel_statuses_json = data.channel_statuses_json,
         channels_json = data.channels_json,
         recordings_json = data.recordings_json
     ))
