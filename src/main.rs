@@ -404,17 +404,21 @@ async fn fetch_latest_version(state: &AppState) -> Result<Option<String>, AppErr
         return Ok(None);
     };
 
-    let body = state
-        .client
-        .get(url)
-        .send()
-        .await
-        .map_err(AppError::bad_gateway)?
-        .error_for_status()
-        .map_err(AppError::bad_gateway)?
-        .text()
-        .await
-        .map_err(AppError::bad_gateway)?;
+    let request = async {
+        let response = state
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(AppError::bad_gateway)?
+            .error_for_status()
+            .map_err(AppError::bad_gateway)?;
+        response.text().await.map_err(AppError::bad_gateway)
+    };
+    let body = match time::timeout(Duration::from_secs(2), request).await {
+        Ok(result) => result?,
+        Err(_) => return Ok(None),
+    };
 
     Ok(parse_version_from_cargo_toml(&body))
 }
