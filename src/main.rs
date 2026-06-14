@@ -1275,12 +1275,23 @@ async fn proxy_upstream(
             .unwrap_or_else(|| "home-iptv-proxy/0.1".to_string())
     };
     let client = proxied_client(&state.client, source_proxy_url, &user_agent)?;
-    let upstream = client
-        .get(target_url)
-        .send()
-        .await
-        .map_err(AppError::bad_gateway)?;
+    let mut request = client.get(target_url);
+
+    for header_name in [
+        reqwest::header::RANGE,
+        reqwest::header::IF_RANGE,
+        reqwest::header::ACCEPT,
+        reqwest::header::ACCEPT_LANGUAGE,
+        reqwest::header::REFERER,
+    ] {
+        if let Some(value) = headers.get(&header_name) {
+            request = request.header(&header_name, value);
+        }
+    }
+
+    let upstream = request.send().await.map_err(AppError::bad_gateway)?;
     let upstream = upstream.error_for_status().map_err(AppError::bad_gateway)?;
+    let upstream_status = upstream.status();
 
     let final_url = upstream.url().clone();
     let content_type = upstream
@@ -1307,19 +1318,25 @@ async fn proxy_upstream(
         return Ok(response);
     }
 
-    let content_type = upstream
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .cloned();
+    let upstream_headers = upstream.headers().clone();
     let mut response = Response::new(Body::from_stream(
         upstream
             .bytes_stream()
             .map_err(|err| std::io::Error::other(err.to_string())),
     ));
-    if let Some(value) = content_type {
-        response
-            .headers_mut()
-            .insert(axum::http::header::CONTENT_TYPE, value);
+    *response.status_mut() = upstream_status;
+    for header_name in [
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::CONTENT_LENGTH,
+        reqwest::header::CONTENT_RANGE,
+        reqwest::header::ACCEPT_RANGES,
+        reqwest::header::CACHE_CONTROL,
+        reqwest::header::ETAG,
+        reqwest::header::LAST_MODIFIED,
+    ] {
+        if let Some(value) = upstream_headers.get(&header_name) {
+            response.headers_mut().insert(header_name, value.clone());
+        }
     }
     Ok(response)
 }
