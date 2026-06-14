@@ -40,7 +40,7 @@ services:
     container_name: home-iptv-proxy
     restart: always
     ports:
-      - "28787:8787"
+      - "28788:8787"
     volumes:
       - ${CONFIG_DIR}:/app/config
     environment:
@@ -59,12 +59,18 @@ write_config() {
   $SUDO tee "$CONFIG_FILE" >/dev/null <<EOF
 bind: 0.0.0.0:8787
 public_base_url: null
+epg_source_url: null
+epg_proxy_url: null
+epg_cache_minutes: 720
+epg_cache_dir: /app/config/cache
+recordings_dir: /app/config/recordings
 refresh_minutes: 30
 user_agent: "home-iptv-proxy/0.1"
 signing_secret: "${secret}"
 sources:
   - name: "source-a"
     url: "https://example.com/playlist-a.m3u"
+    proxy_url: null
     enabled: true
 EOF
   log "已生成默认配置: $CONFIG_FILE"
@@ -80,8 +86,8 @@ do_install() {
   echo
   echo -e "${GREEN}${BOLD}安装完成${NC}"
   echo -e "配置文件: ${CYAN}${CONFIG_FILE}${NC}"
-  echo -e "播放列表: ${CYAN}http://<你的主机IP>:28787/list.m3u${NC}"
-  echo -e "健康检查: ${CYAN}http://<你的主机IP>:28787/health${NC}"
+  echo -e "播放列表: ${CYAN}http://<你的主机IP>:28788/list.m3u${NC}"
+  echo -e "健康检查: ${CYAN}http://<你的主机IP>:28788/health${NC}"
 }
 
 do_update() {
