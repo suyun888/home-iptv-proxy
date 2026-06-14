@@ -62,7 +62,7 @@ services:
       IPTV_CONFIG: /app/config/sources.yaml
       IPTV_IMAGE_NAME: ${IMAGE_NAME}
       IPTV_AUTO_UPDATE_ENABLED: "true"
-      IPTV_UPDATE_COMMAND: docker-compose -f /app/deploy/docker-compose.yml pull && docker-compose -f /app/deploy/docker-compose.yml up -d
+      IPTV_UPDATE_COMMAND: docker compose -f /app/deploy/docker-compose.yml pull home-iptv-proxy && docker compose -f /app/deploy/docker-compose.yml up -d home-iptv-proxy
       IPTV_XHS_APPLY_COMMAND: docker-compose -f /app/deploy/docker-compose.yml up -d xhsuhd
 
   watchtower:

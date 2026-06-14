@@ -51,6 +51,7 @@ struct AppState {
     active_recordings: Arc<Mutex<HashSet<String>>>,
     app_version: Arc<String>,
     app_image: Arc<String>,
+    version_check_url: Arc<Option<String>>,
     auto_update_enabled: bool,
     manual_update_command: Arc<Option<String>>,
     xhs_apply_command: Arc<Option<String>>,
@@ -178,6 +179,8 @@ struct HealthResponse {
     source_errors: BTreeMap<String, String>,
     epg_cache_ready: bool,
     version: String,
+    latest_version: Option<String>,
+    update_available: bool,
     auto_update_enabled: bool,
     manual_update_enabled: bool,
 }
@@ -185,6 +188,9 @@ struct HealthResponse {
 #[derive(Serialize)]
 struct AdminPageData {
     app_version: String,
+    latest_version: String,
+    update_available: bool,
+    update_status: String,
     app_image: String,
     auto_update_status: String,
     manual_update_label: String,
@@ -248,6 +254,11 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|_| env::var("APP_IMAGE_NAME"))
         .unwrap_or_else(|_| "home-iptv-proxy:local".to_string());
     let auto_update_enabled = env_flag("IPTV_AUTO_UPDATE_ENABLED");
+    let version_check_url = env::var("IPTV_VERSION_CHECK_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| default_version_check_url(&app_image));
     let manual_update_command = env::var("IPTV_UPDATE_COMMAND")
         .ok()
         .map(|value| value.trim().to_string())
@@ -285,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         active_recordings: Arc::new(Mutex::new(HashSet::new())),
         app_version: Arc::new(APP_VERSION.to_string()),
         app_image: Arc::new(app_image),
+        version_check_url: Arc::new(version_check_url),
         auto_update_enabled,
         manual_update_command: Arc::new(manual_update_command),
         xhs_apply_command: Arc::new(xhs_apply_command),
@@ -364,6 +376,47 @@ fn xhs_env_path_from_config(config_path: &str) -> PathBuf {
     let base = PathBuf::from(config_path);
     let dir = base.parent().unwrap_or_else(|| FsPath::new("."));
     dir.join("xhsuhd.env")
+}
+
+fn default_version_check_url(app_image: &str) -> Option<String> {
+    let trimmed = app_image.trim();
+    let image = trimmed.strip_prefix("ghcr.io/")?;
+    let image = image.split('@').next().unwrap_or(image);
+    let image = image.split(':').next().unwrap_or(image);
+    let (owner, repo) = image.split_once('/')?;
+    Some(format!(
+        "https://raw.githubusercontent.com/{owner}/{repo}/main/Cargo.toml"
+    ))
+}
+
+fn parse_version_from_cargo_toml(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("version = \"") {
+            return value.strip_suffix('"').map(str::to_string);
+        }
+    }
+    None
+}
+
+async fn fetch_latest_version(state: &AppState) -> Result<Option<String>, AppError> {
+    let Some(url) = state.version_check_url.as_ref().clone() else {
+        return Ok(None);
+    };
+
+    let body = state
+        .client
+        .get(url)
+        .send()
+        .await
+        .map_err(AppError::bad_gateway)?
+        .error_for_status()
+        .map_err(AppError::bad_gateway)?
+        .text()
+        .await
+        .map_err(AppError::bad_gateway)?;
+
+    Ok(parse_version_from_cargo_toml(&body))
 }
 
 async fn load_recordings(path: &PathBuf) -> Result<Vec<RecordingTask>, AppError> {
@@ -596,6 +649,12 @@ async fn root() -> impl IntoResponse {
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let runtime = state.runtime.read().await;
     let config = state.config.read().await.clone();
+    let latest_version = fetch_latest_version(&state).await.ok().flatten();
+    let current_version = state.app_version.as_ref().clone();
+    let update_available = latest_version
+        .as_ref()
+        .map(|latest| latest != &current_version)
+        .unwrap_or(false);
     let epg_cache_ready = match epg_cache_paths(&config) {
         Ok(paths) => paths.raw_path.exists(),
         Err(_) => false,
@@ -606,7 +665,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         last_refresh_ok: runtime.last_refresh_ok,
         source_errors: runtime.source_errors.clone(),
         epg_cache_ready,
-        version: state.app_version.as_ref().clone(),
+        version: current_version,
+        latest_version,
+        update_available,
         auto_update_enabled: state.auto_update_enabled,
         manual_update_enabled: state.manual_update_command.is_some(),
     })
@@ -1369,6 +1430,13 @@ async fn admin_page(
     let config = state.config.read().await.clone();
     let runtime = state.runtime.read().await;
     let recordings = state.recordings.read().await.clone();
+    let current_version = state.app_version.as_ref().clone();
+    let latest_version = fetch_latest_version(&state)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| current_version.clone());
+    let update_available = latest_version != current_version;
     let status = query.get("status").map(String::as_str).unwrap_or("");
     let (status_message, status_class) = match status {
         "saved" => ("保存成功，已自动刷新频道列表。", "ok"),
@@ -1425,7 +1493,14 @@ async fn admin_page(
     };
 
     let data = AdminPageData {
-        app_version: state.app_version.as_ref().clone(),
+        app_version: current_version,
+        latest_version: latest_version.clone(),
+        update_available,
+        update_status: if update_available {
+            format!("发现新版本 v{latest_version}，可以手动更新或等待自动更新。")
+        } else {
+            "当前已经是最新版本。".to_string()
+        },
         app_image: state.app_image.as_ref().clone(),
         auto_update_status: if state.auto_update_enabled {
             "已启用（Watchtower 或外部策略会自动拉取新版本）".to_string()
@@ -1433,7 +1508,11 @@ async fn admin_page(
             "未启用".to_string()
         },
         manual_update_label: if manual_update_enabled {
-            "立即手动更新".to_string()
+            if update_available {
+                format!("立即更新到 v{latest_version}")
+            } else {
+                "重新拉取并更新".to_string()
+            }
         } else {
             "手动更新未启用".to_string()
         },
@@ -2179,17 +2258,18 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
             <div class="stat-card">
               <div class="stat-kicker">当前版本</div>
               <div class="stat-value">v{app_version}</div>
-              <div class="sub">后台版本号会跟随容器内程序一起更新。</div>
+              <div class="sub">最新版本：v{latest_version}</div>
             </div>
             <div class="stat-card">
               <div class="stat-kicker">自动更新</div>
               <div class="stat-value" style="font-size:18px;">{auto_update_status}</div>
-              <div class="sub">镜像：<code>{app_image}</code></div>
+              <div class="sub">{update_status}</div>
             </div>
             <div class="stat-card">
               <div class="stat-kicker">手动更新</div>
               <div class="actions" style="margin-top:0;">{manual_update_action}</div>
               <div class="sub">{manual_update_hint}</div>
+              <div class="sub">镜像：<code>{app_image}</code></div>
             </div>
           </div>
         </div>
@@ -2480,6 +2560,8 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 </html>"#,
         status_block = status_block,
         app_version = escape_html(&data.app_version),
+        latest_version = escape_html(&data.latest_version),
+        update_status = escape_html(&data.update_status),
         app_image = escape_html(&data.app_image),
         auto_update_status = escape_html(&data.auto_update_status),
         manual_update_action = manual_update_action,
