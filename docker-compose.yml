@@ -1,11 +1,32 @@
 services:
+  xhsuhd:
+    image: iptvtop/xhsuhd:latest
+    container_name: xhsuhd
+    restart: always
+    ports:
+      - "34567:34567"
+    env_file:
+      - ./config/xhsuhd.env
+
   home-iptv-proxy:
-    build: .
+    image: ghcr.io/suyun888/home-iptv-proxy:latest
     container_name: home-iptv-proxy
     restart: always
     ports:
       - "28788:8787"
     volumes:
       - ./config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       IPTV_CONFIG: /app/config/sources.yaml
+      IPTV_IMAGE_NAME: ghcr.io/suyun888/home-iptv-proxy:latest
+      IPTV_AUTO_UPDATE_ENABLED: "true"
+      IPTV_XHS_APPLY_COMMAND: docker compose up -d xhsuhd
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: home-iptv-proxy-watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: home-iptv-proxy --cleanup --interval 3600

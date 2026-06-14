@@ -36,17 +36,24 @@ use tracing::{info, warn};
 use url::Url;
 
 type HmacSha256 = Hmac<Sha256>;
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone)]
 struct AppState {
     client: Client,
     config_path: Arc<String>,
     recordings_path: Arc<PathBuf>,
+    xhs_env_path: Arc<PathBuf>,
     config: Arc<RwLock<Config>>,
     recordings: Arc<RwLock<Vec<RecordingTask>>>,
     runtime: Arc<RwLock<RuntimeState>>,
     epg_cache_lock: Arc<Mutex<()>>,
     active_recordings: Arc<Mutex<HashSet<String>>>,
+    app_version: Arc<String>,
+    app_image: Arc<String>,
+    auto_update_enabled: bool,
+    manual_update_command: Arc<Option<String>>,
+    xhs_apply_command: Arc<Option<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,6 +67,8 @@ struct Config {
     epg_cache_minutes: Option<u64>,
     epg_cache_dir: Option<String>,
     recordings_dir: Option<String>,
+    xhs_a1: Option<String>,
+    xhs_web_session: Option<String>,
     signing_secret: String,
     sources: Vec<SourceConfig>,
 }
@@ -168,10 +177,23 @@ struct HealthResponse {
     last_refresh_ok: bool,
     source_errors: BTreeMap<String, String>,
     epg_cache_ready: bool,
+    version: String,
+    auto_update_enabled: bool,
+    manual_update_enabled: bool,
 }
 
 #[derive(Serialize)]
 struct AdminPageData {
+    app_version: String,
+    app_image: String,
+    auto_update_status: String,
+    manual_update_label: String,
+    manual_update_hint: String,
+    manual_update_enabled: bool,
+    xhs_a1: String,
+    xhs_web_session: String,
+    xhs_apply_enabled: bool,
+    xhs_apply_hint: String,
     public_base_url: String,
     refresh_minutes: String,
     user_agent: String,
@@ -222,9 +244,22 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let config_path = env::var("IPTV_CONFIG").unwrap_or_else(|_| "config/sources.yaml".to_string());
+    let app_image = env::var("IPTV_IMAGE_NAME")
+        .or_else(|_| env::var("APP_IMAGE_NAME"))
+        .unwrap_or_else(|_| "home-iptv-proxy:local".to_string());
+    let auto_update_enabled = env_flag("IPTV_AUTO_UPDATE_ENABLED");
+    let manual_update_command = env::var("IPTV_UPDATE_COMMAND")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let xhs_apply_command = env::var("IPTV_XHS_APPLY_COMMAND")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let config_text = tokio::fs::read_to_string(&config_path).await?;
     let config: Config = serde_yaml::from_str(&config_text)?;
     let recordings_path = recordings_path_from_config(&config_path);
+    let xhs_env_path = xhs_env_path_from_config(&config_path);
     let recordings = load_recordings(&recordings_path).await.unwrap_or_default();
 
     let user_agent = config
@@ -242,12 +277,22 @@ async fn main() -> anyhow::Result<()> {
         client,
         config_path: Arc::new(config_path),
         recordings_path: Arc::new(recordings_path),
+        xhs_env_path: Arc::new(xhs_env_path),
         config: Arc::new(RwLock::new(config)),
         recordings: Arc::new(RwLock::new(normalize_recordings(recordings))),
         runtime: Arc::new(RwLock::new(RuntimeState::default())),
         epg_cache_lock: Arc::new(Mutex::new(())),
         active_recordings: Arc::new(Mutex::new(HashSet::new())),
+        app_version: Arc::new(APP_VERSION.to_string()),
+        app_image: Arc::new(app_image),
+        auto_update_enabled,
+        manual_update_command: Arc::new(manual_update_command),
+        xhs_apply_command: Arc::new(xhs_apply_command),
     };
+
+    sync_xhs_env_file(&state)
+        .await
+        .map_err(|err| anyhow::anyhow!(err.message.clone()))?;
 
     refresh_channels(&state).await;
     spawn_refresh_loop(state.clone());
@@ -267,8 +312,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/epg/programmes", get(admin_epg_programmes))
         .route("/admin/recordings/create", post(create_recording))
         .route("/admin/recordings/delete", post(delete_recording))
+        .route("/admin/xhs/apply", post(apply_xhs_credentials))
         .route("/admin", get(admin_page))
         .route("/admin/save", post(save_admin))
+        .route("/admin/update", post(run_manual_update))
         .with_state(state.clone());
 
     let bind = {
@@ -295,10 +342,28 @@ fn init_tracing() {
         .init();
 }
 
+fn env_flag(name: &str) -> bool {
+    matches!(
+        env::var(name)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
 fn recordings_path_from_config(config_path: &str) -> PathBuf {
     let base = PathBuf::from(config_path);
     let dir = base.parent().unwrap_or_else(|| FsPath::new("."));
     dir.join("recordings.json")
+}
+
+fn xhs_env_path_from_config(config_path: &str) -> PathBuf {
+    let base = PathBuf::from(config_path);
+    let dir = base.parent().unwrap_or_else(|| FsPath::new("."));
+    dir.join("xhsuhd.env")
 }
 
 async fn load_recordings(path: &PathBuf) -> Result<Vec<RecordingTask>, AppError> {
@@ -541,6 +606,9 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         last_refresh_ok: runtime.last_refresh_ok,
         source_errors: runtime.source_errors.clone(),
         epg_cache_ready,
+        version: state.app_version.as_ref().clone(),
+        auto_update_enabled: state.auto_update_enabled,
+        manual_update_enabled: state.manual_update_command.is_some(),
     })
 }
 
@@ -1287,6 +1355,12 @@ async fn admin_page(
     let status = query.get("status").map(String::as_str).unwrap_or("");
     let (status_message, status_class) = match status {
         "saved" => ("保存成功，已自动刷新频道列表。", "ok"),
+        "saved_xhs_applied" => ("保存成功，并已把 xhsuhd 凭证应用到上游容器。", "ok"),
+        "saved_xhs_pending" => ("保存成功，xhsuhd 凭证已写入配置，但当前部署未启用一键应用。", "ok"),
+        "updated" => ("手动更新命令已执行完成，容器重启后版本号会自动刷新。", "ok"),
+        "update_error" => ("手动更新失败，请查看容器日志确认原因。", "error"),
+        "xhs_applied" => ("xhsuhd 凭证已重新应用，失效后可在这里直接替换。", "ok"),
+        "xhs_apply_error" => ("xhsuhd 凭证应用失败，请查看容器日志确认原因。", "error"),
         "error" => ("保存失败，请检查输入内容后重试。", "error"),
         _ => ("", ""),
     };
@@ -1325,7 +1399,37 @@ async fn admin_page(
     )
     .map_err(AppError::internal)?;
 
+    let manual_update_enabled = state.manual_update_command.is_some();
+    let xhs_apply_enabled = state.xhs_apply_command.is_some();
+    let manual_update_hint = if manual_update_enabled {
+        "会在容器内执行预设更新命令，页面可能会短暂断开。".to_string()
+    } else {
+        "当前未启用手动更新，需要在部署时配置 IPTV_UPDATE_COMMAND。".to_string()
+    };
+
     let data = AdminPageData {
+        app_version: state.app_version.as_ref().clone(),
+        app_image: state.app_image.as_ref().clone(),
+        auto_update_status: if state.auto_update_enabled {
+            "已启用（Watchtower 或外部策略会自动拉取新版本）".to_string()
+        } else {
+            "未启用".to_string()
+        },
+        manual_update_label: if manual_update_enabled {
+            "立即手动更新".to_string()
+        } else {
+            "手动更新未启用".to_string()
+        },
+        manual_update_hint,
+        manual_update_enabled,
+        xhs_a1: config.xhs_a1.clone().unwrap_or_default(),
+        xhs_web_session: config.xhs_web_session.clone().unwrap_or_default(),
+        xhs_apply_enabled,
+        xhs_apply_hint: if xhs_apply_enabled {
+            "保存后可一键把新 Cookie 应用到 xhsuhd 容器。".to_string()
+        } else {
+            "当前部署未启用一键应用，只会把值保存到配置文件和 xhsuhd.env。".to_string()
+        },
         public_base_url: config.public_base_url.unwrap_or_default(),
         refresh_minutes: config
             .refresh_minutes
@@ -1349,8 +1453,8 @@ async fn admin_page(
         signing_secret: config.signing_secret,
         sources: if config.sources.is_empty() {
             vec![AdminSourceView {
-                name: "source-1".to_string(),
-                url: String::new(),
+                name: "xhsuhd".to_string(),
+                url: "http://xhsuhd:34567/xhslist.m3u".to_string(),
                 proxy_url: String::new(),
                 enabled: true,
             }]
@@ -1470,6 +1574,8 @@ async fn save_admin(
         epg_cache_minutes: Some(epg_cache_minutes.max(1)),
         epg_cache_dir: clean_optional(first_value(&values, "epg_cache_dir")),
         recordings_dir: clean_optional(first_value(&values, "recordings_dir")),
+        xhs_a1: clean_optional(first_value(&values, "xhs_a1")),
+        xhs_web_session: clean_optional(first_value(&values, "xhs_web_session")),
         signing_secret,
         sources,
     };
@@ -1484,8 +1590,81 @@ async fn save_admin(
         *config = new_config;
     }
 
+    sync_xhs_env_file(&state).await?;
     refresh_channels(&state).await;
-    Ok(Redirect::to("/admin?status=saved"))
+    let status = if state.xhs_apply_command.is_some() {
+        match run_xhs_apply_command(&state).await {
+            Ok(()) => "saved_xhs_applied",
+            Err(err) => {
+                warn!("xhs apply after save failed: {}", err.message);
+                "saved_xhs_pending"
+            }
+        }
+    } else {
+        "saved_xhs_pending"
+    };
+    Ok(Redirect::to(&format!("/admin?status={status}")))
+}
+
+async fn run_manual_update(State(state): State<AppState>) -> Result<Redirect, AppError> {
+    let Some(command) = state.manual_update_command.as_ref().clone() else {
+        return Err(AppError::bad_request("当前部署未启用手动更新命令"));
+    };
+
+    info!("running manual update command");
+    let output = Command::new("sh")
+        .arg("-lc")
+        .arg(&command)
+        .output()
+        .await
+        .map_err(AppError::internal)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("manual update failed: {}", stderr.trim());
+        return Ok(Redirect::to("/admin?status=update_error"));
+    }
+
+    Ok(Redirect::to("/admin?status=updated"))
+}
+
+async fn apply_xhs_credentials(State(state): State<AppState>) -> Result<Redirect, AppError> {
+    sync_xhs_env_file(&state).await?;
+    run_xhs_apply_command(&state).await?;
+    Ok(Redirect::to("/admin?status=xhs_applied"))
+}
+
+async fn sync_xhs_env_file(state: &AppState) -> Result<(), AppError> {
+    let config = state.config.read().await.clone();
+    let body = format!(
+        "XHS_A1={}\nXHS_WEB_SESSION={}\n",
+        config.xhs_a1.unwrap_or_default(),
+        config.xhs_web_session.unwrap_or_default()
+    );
+    tokio::fs::write(&*state.xhs_env_path, body)
+        .await
+        .map_err(AppError::internal)
+}
+
+async fn run_xhs_apply_command(state: &AppState) -> Result<(), AppError> {
+    let Some(command) = state.xhs_apply_command.as_ref().clone() else {
+        return Err(AppError::bad_request("当前部署未启用 xhsuhd 一键应用命令"));
+    };
+
+    let output = Command::new("sh")
+        .arg("-lc")
+        .arg(&command)
+        .output()
+        .await
+        .map_err(AppError::internal)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!("xhs apply command failed: {}", stderr.trim());
+        return Err(AppError::internal("xhsuhd apply command failed"));
+    }
+
+    Ok(())
 }
 
 async fn admin_epg_programmes(
@@ -1695,6 +1874,22 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
             message = escape_html(&data.status_message)
         )
     };
+    let manual_update_action = if data.manual_update_enabled {
+        format!(
+            r#"<form method="post" action="/admin/update"><button class="primary" type="submit">{}</button></form>"#,
+            escape_html(&data.manual_update_label)
+        )
+    } else {
+        format!(
+            r#"<button class="ghost" type="button" disabled>{}</button>"#,
+            escape_html(&data.manual_update_label)
+        )
+    };
+    let xhs_apply_action = if data.xhs_apply_enabled {
+        r#"<form class="inline" method="post" action="/admin/xhs/apply"><button class="ghost" type="submit">应用 xhsuhd 凭证</button></form>"#.to_string()
+    } else {
+        r#"<button class="ghost" type="button" disabled>应用 xhsuhd 凭证</button>"#.to_string()
+    };
 
     Ok(format!(
         r#"<!DOCTYPE html>
@@ -1752,6 +1947,38 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       border-radius: 22px;
       box-shadow: 0 18px 60px rgba(79, 51, 24, 0.09);
       overflow: hidden;
+    }}
+    .stack {{
+      display: grid;
+      gap: 18px;
+    }}
+    .version-grid {{
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-items: start;
+    }}
+    .stat-card {{
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 18px;
+      padding: 16px;
+      display: grid;
+      gap: 8px;
+      min-height: 132px;
+    }}
+    .stat-kicker {{
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }}
+    .stat-value {{
+      font-size: 24px;
+      font-weight: 800;
+      line-height: 1.1;
+      word-break: break-word;
     }}
     .panel-head {{
       display: flex;
@@ -1876,6 +2103,14 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       background: #f7dfdc;
       color: #7e3029;
     }}
+    button:disabled {{
+      opacity: 0.55;
+      cursor: not-allowed;
+      transform: none;
+    }}
+    form.inline {{
+      margin: 0;
+    }}
     .notice {{
       margin-bottom: 18px;
       padding: 14px 16px;
@@ -1897,7 +2132,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       font-size: 13px;
     }}
     @media (max-width: 760px) {{
-      .grid, .source-grid {{
+      .grid, .source-grid, .version-grid {{
         grid-template-columns: 1fr;
       }}
       .panel-head {{
@@ -1913,16 +2148,45 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       <h1>订阅中转后台</h1>
       <div class="sub">在这里维护上游 m3u 地址，保存后会自动刷新，本地订阅地址保持不变。</div>
     </div>
-    <div class="panel">
-      <div class="panel-head">
-        <div>
-          <div class="panel-title">源地址管理</div>
-          <div class="sub">本地输出：<code>/list.m3u</code> / <code>/m3u</code> / <code>/txt</code> / <code>/epg.xml.gz</code></div>
+    <div class="stack">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">版本与更新</div>
+            <div class="sub">这里会显示当前版本、镜像来源，以及自动更新和手动更新状态。</div>
+          </div>
+        </div>
+        <div class="panel-body">
+          {status_block}
+          <div class="version-grid">
+            <div class="stat-card">
+              <div class="stat-kicker">当前版本</div>
+              <div class="stat-value">v{app_version}</div>
+              <div class="sub">后台版本号会跟随容器内程序一起更新。</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-kicker">自动更新</div>
+              <div class="stat-value" style="font-size:18px;">{auto_update_status}</div>
+              <div class="sub">镜像：<code>{app_image}</code></div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-kicker">手动更新</div>
+              <div class="actions" style="margin-top:0;">{manual_update_action}</div>
+              <div class="sub">{manual_update_hint}</div>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="panel-body">
-        {status_block}
-        <form method="post" action="/admin/save">
+
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">源地址管理</div>
+            <div class="sub">本地输出：<code>/list.m3u</code> / <code>/m3u</code> / <code>/txt</code> / <code>/epg.xml.gz</code></div>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form method="post" action="/admin/save">
           <div class="grid">
             <div class="field">
               <label for="public_base_url">外部访问地址（可选）</label>
@@ -1960,6 +2224,14 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
               <label for="recordings_dir">录制输出目录</label>
               <input id="recordings_dir" name="recordings_dir" value="{recordings_dir}" placeholder="例如 /app/config/recordings">
             </div>
+            <div class="field full">
+              <label for="xhs_a1">xhsuhd 的 a1 Cookie</label>
+              <input id="xhs_a1" name="xhs_a1" type="password" value="{xhs_a1}" placeholder="小红书 Cookie 里的 a1">
+            </div>
+            <div class="field full">
+              <label for="xhs_web_session">xhsuhd 的 web_session Cookie</label>
+              <input id="xhs_web_session" name="xhs_web_session" type="password" value="{xhs_web_session}" placeholder="小红书 Cookie 里的 web_session">
+            </div>
           </div>
 
           <div class="panel-title">M3U 源列表</div>
@@ -1968,7 +2240,9 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           <div class="actions">
             <button class="ghost" type="button" id="add-source">新增一条源地址</button>
             <button class="primary" type="submit">保存并刷新</button>
+            {xhs_apply_action}
           </div>
+          <div class="footer-note">{xhs_apply_hint}</div>
         </form>
 
         <div class="panel-title" style="margin-top:28px;">节目单录制</div>
@@ -1995,6 +2269,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         <div class="panel-title" style="margin-top:28px;">已创建录制任务</div>
         <div class="sources" id="recording-list"></div>
         <div class="footer-note">保存后会直接写入服务器配置文件，并重新抓取频道列表。节目单会按缓存策略落盘，`/epg.xml.gz` 适合给播放器长期订阅。</div>
+        </div>
       </div>
     </div>
   </div>
@@ -2187,6 +2462,15 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 </body>
 </html>"#,
         status_block = status_block,
+        app_version = escape_html(&data.app_version),
+        app_image = escape_html(&data.app_image),
+        auto_update_status = escape_html(&data.auto_update_status),
+        manual_update_action = manual_update_action,
+        manual_update_hint = escape_html(&data.manual_update_hint),
+        xhs_a1 = escape_html(&data.xhs_a1),
+        xhs_web_session = escape_html(&data.xhs_web_session),
+        xhs_apply_action = xhs_apply_action,
+        xhs_apply_hint = escape_html(&data.xhs_apply_hint),
         public_base_url = escape_html(&data.public_base_url),
         refresh_minutes = escape_html(&data.refresh_minutes),
         user_agent = escape_html(&data.user_agent),
