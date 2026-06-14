@@ -904,7 +904,14 @@ async fn root() -> impl IntoResponse {
 }
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    let runtime = state.runtime.read().await;
+    let (last_refresh_ok, channels_len, source_errors) = {
+        let runtime = state.runtime.read().await;
+        (
+            runtime.last_refresh_ok,
+            runtime.channels.len(),
+            runtime.source_errors.clone(),
+        )
+    };
     let config = state.config.read().await.clone();
     let latest_version = fetch_latest_version(&state).await.ok().flatten();
     let current_version = state.app_version.as_ref().clone();
@@ -917,10 +924,10 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         Err(_) => false,
     };
     Json(HealthResponse {
-        ok: runtime.last_refresh_ok,
-        channels: runtime.channels.len(),
-        last_refresh_ok: runtime.last_refresh_ok,
-        source_errors: runtime.source_errors.clone(),
+        ok: last_refresh_ok,
+        channels: channels_len,
+        last_refresh_ok,
+        source_errors,
         epg_cache_ready,
         version: current_version,
         latest_version,
@@ -1696,8 +1703,11 @@ async fn admin_page(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Html<String>, AppError> {
     let config = state.config.read().await.clone();
-    let runtime = state.runtime.read().await;
     let recordings = state.recordings.read().await.clone();
+    let (channels_snapshot, source_stats_snapshot) = {
+        let runtime = state.runtime.read().await;
+        (runtime.channels.clone(), runtime.source_stats.clone())
+    };
     let current_version = state.app_version.as_ref().clone();
     let latest_version = fetch_latest_version(&state)
         .await
@@ -1723,8 +1733,7 @@ async fn admin_page(
     };
 
     let channels_json = serde_json::to_string(
-        &runtime
-            .channels
+        &channels_snapshot
             .iter()
             .map(|channel| ChannelOptionView {
                 id: channel.id.clone(),
@@ -1736,15 +1745,13 @@ async fn admin_page(
     )
     .map_err(AppError::internal)?;
     let source_statuses_json =
-        serde_json::to_string(&runtime.source_stats).map_err(AppError::internal)?;
-    let source_stats_by_name = runtime
-        .source_stats
+        serde_json::to_string(&source_stats_snapshot).map_err(AppError::internal)?;
+    let source_stats_by_name = source_stats_snapshot
         .iter()
         .map(|item| (item.name.clone(), item.clone()))
         .collect::<HashMap<_, _>>();
     let channel_statuses_json = serde_json::to_string(
-        &runtime
-            .channels
+        &channels_snapshot
             .iter()
             .map(|channel| {
                 let source_stat = source_stats_by_name.get(&channel.source_name);
