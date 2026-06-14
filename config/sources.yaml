@@ -1,12 +1,19 @@
 bind: 0.0.0.0:8787
 public_base_url: null
+epg_source_url: null
+epg_proxy_url: null
+epg_cache_minutes: 720
+epg_cache_dir: /app/config/cache
+recordings_dir: /app/config/recordings
 refresh_minutes: 30
 user_agent: "home-iptv-proxy/0.1"
 signing_secret: "change-this-secret"
 sources:
   - name: "source-a"
     url: "https://example.com/playlist-a.m3u"
-    enabled: true
+    proxy_url: null
+    enabled: false
   - name: "source-b"
     url: "https://example.com/playlist-b.m3u"
+    proxy_url: null
     enabled: false
