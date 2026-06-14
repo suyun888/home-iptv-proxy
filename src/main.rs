@@ -493,7 +493,7 @@ fn parse_extinf(line: &str) -> M3uMeta {
 }
 
 fn extract_attr(line: &str, key: &str) -> Option<String> {
-    let needle = format!(r#"{key}=\""#);
+    let needle = format!(r#"{key}=""#);
     let start = line.find(&needle)? + needle.len();
     let rest = &line[start..];
     let end = rest.find('"')?;
@@ -1090,19 +1090,19 @@ async fn list_m3u(
 
     let mut body = String::from("#EXTM3U");
     if let Some(epg_url) = epg_url {
-        body.push_str(&format!(r#" x-tvg-url=\"{}\""#, epg_url));
+        body.push_str(&format!(r#" x-tvg-url="{}""#, epg_url));
     }
     body.push('\n');
     for channel in &runtime.channels {
         body.push_str("#EXTINF:-1");
         if let Some(tvg_id) = &channel.tvg_id {
-            body.push_str(&format!(r#" tvg-id=\"{}\""#, tvg_id));
+            body.push_str(&format!(r#" tvg-id="{}""#, tvg_id));
         }
         if let Some(tvg_logo) = &channel.tvg_logo {
-            body.push_str(&format!(r#" tvg-logo=\"{}\""#, tvg_logo));
+            body.push_str(&format!(r#" tvg-logo="{}""#, tvg_logo));
         }
         body.push_str(&format!(
-            r#" group-title=\"{}\" source-name=\"{}\""#,
+            r#" group-title="{}" source-name="{}""#,
             channel.group, channel.source_name
         ));
         body.push_str(&format!(",{}\n", channel.name));
@@ -2123,9 +2123,9 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         card.innerHTML = `
           <div class="source-top">
             <div>
-              <div class="source-badge">${channel.name}</div>
-              <div style="font-weight:700;font-size:16px;">${programme.title}</div>
-              <div class="sub">${start.toLocaleString()} - ${end.toLocaleString()}</div>
+              <div class="source-badge">${{channel.name}}</div>
+              <div style="font-weight:700;font-size:16px;">${{programme.title}}</div>
+              <div class="sub">${{start.toLocaleString()}} - ${{end.toLocaleString()}}</div>
             </div>
             <button class="primary" type="button">加入录制</button>
           </div>
@@ -2144,20 +2144,20 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       recordings.forEach((task) => {{
         const card = document.createElement("div");
         card.className = "source-card";
-        const errorBlock = task.last_error ? `<div class="sub" style="color:#9c3d34;">${task.last_error}</div>` : "";
-        const outputBlock = task.output_file ? `<div class="sub">输出文件：${task.output_file}</div>` : "";
+        const errorBlock = task.last_error ? `<div class="sub" style="color:#9c3d34;">${{task.last_error}}</div>` : "";
+        const outputBlock = task.output_file ? `<div class="sub">输出文件：${{task.output_file}}</div>` : "";
         card.innerHTML = `
           <div class="source-top">
             <div>
-              <div class="source-badge">${task.status}</div>
-              <div style="font-weight:700;font-size:16px;">${task.program_title}</div>
-              <div class="sub">${task.channel_name} | ${new Date(task.start_at).toLocaleString()} - ${new Date(task.end_at).toLocaleString()}</div>
-              <div class="sub">提前 ${task.pre_minutes} 分钟，延后 ${task.post_minutes} 分钟</div>
-              ${outputBlock}
-              ${errorBlock}
+              <div class="source-badge">${{task.status}}</div>
+              <div style="font-weight:700;font-size:16px;">${{task.program_title}}</div>
+              <div class="sub">${{task.channel_name}} | ${{new Date(task.start_at).toLocaleString()}} - ${{new Date(task.end_at).toLocaleString()}}</div>
+              <div class="sub">提前 ${{task.pre_minutes}} 分钟，延后 ${{task.post_minutes}} 分钟</div>
+              ${{outputBlock}}
+              ${{errorBlock}}
             </div>
             <form method="post" action="/admin/recordings/delete">
-              <input type="hidden" name="id" value="${task.id}">
+              <input type="hidden" name="id" value="${{task.id}}">
               <button class="danger" type="submit">删除</button>
             </form>
           </div>
