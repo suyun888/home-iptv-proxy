@@ -19,6 +19,12 @@ CONFIG_FILE="${CONFIG_DIR}/sources.yaml"
 IMAGE_NAME="${IMAGE_NAME:-ghcr.io/suyun888/home-iptv-proxy:latest}"
 WATCHTOWER_IMAGE="${WATCHTOWER_IMAGE:-containrrr/watchtower:latest}"
 XHS_IMAGE="${XHS_IMAGE:-iptvtop/xhsuhd:latest}"
+FOURGTV_IMAGE="${FOURGTV_IMAGE:-instituteiptv/iptv-4gtv-system:latest}"
+FOURGTV_PORT="${FOURGTV_PORT:-19950}"
+FOURGTV_CACHE_DIR="${FOURGTV_CACHE_DIR:-${CONFIG_DIR}/4gtv-cache}"
+FOURGTV_SEGMENTS_WINDOW="${FOURGTV_SEGMENTS_WINDOW:-8}"
+FOURGTV_FETCH_TIMEOUT="${FOURGTV_FETCH_TIMEOUT:-4}"
+FOURGTV_ACCESS_TOKEN="${FOURGTV_ACCESS_TOKEN:-change-this-token}"
 PORT="${PORT:-28788}"
 XHS_ENV_FILE="${CONFIG_DIR}/xhsuhd.env"
 
@@ -36,7 +42,7 @@ need_cmd() {
 }
 
 write_compose() {
-  $SUDO mkdir -p "$CONFIG_DIR"
+  $SUDO mkdir -p "$CONFIG_DIR" "$FOURGTV_CACHE_DIR"
   $SUDO tee "$COMPOSE_FILE" >/dev/null <<EOF
 services:
   xhsuhd:
@@ -47,6 +53,19 @@ services:
       - "34567:34567"
     env_file:
       - ${XHS_ENV_FILE}
+
+  iptv-4gtv-system:
+    image: ${FOURGTV_IMAGE}
+    container_name: iptv-4gtv-system
+    restart: always
+    ports:
+      - "${FOURGTV_PORT}:5050"
+    volumes:
+      - ${FOURGTV_CACHE_DIR}:/data/cache
+    environment:
+      SEGMENTS_WINDOW: "${FOURGTV_SEGMENTS_WINDOW}"
+      FETCH_TIMEOUT: "${FOURGTV_FETCH_TIMEOUT}"
+      ACCESS_TOKEN: "${FOURGTV_ACCESS_TOKEN}"
 
   home-iptv-proxy:
     image: ${IMAGE_NAME}
@@ -63,7 +82,7 @@ services:
       IPTV_IMAGE_NAME: ${IMAGE_NAME}
       IPTV_AUTO_UPDATE_ENABLED: "true"
       IPTV_UPDATE_COMMAND: docker compose -f /app/deploy/docker-compose.yml pull home-iptv-proxy && docker compose -f /app/deploy/docker-compose.yml up -d home-iptv-proxy
-      IPTV_XHS_APPLY_COMMAND: docker-compose -f /app/deploy/docker-compose.yml up -d xhsuhd
+      IPTV_XHS_APPLY_COMMAND: docker compose -f /app/deploy/docker-compose.yml up -d xhsuhd
 
   watchtower:
     image: ${WATCHTOWER_IMAGE}
@@ -73,7 +92,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       DOCKER_API_VERSION: "1.40"
-    command: home-iptv-proxy --cleanup --interval 3600
+    command: home-iptv-proxy iptv-4gtv-system --cleanup --interval 3600
 EOF
 }
 
@@ -101,6 +120,10 @@ sources:
     url: "http://xhsuhd:34567/xhslist.m3u"
     proxy_url: null
     enabled: true
+  - name: "4gtv"
+    url: "http://iptv-4gtv-system:5050/?type=m3u&token=${FOURGTV_ACCESS_TOKEN}&proxy=true"
+    proxy_url: null
+    enabled: false
 EOF
   log "已生成默认配置: $CONFIG_FILE"
 }

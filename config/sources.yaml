@@ -15,6 +15,10 @@ sources:
     url: "http://xhsuhd:34567/xhslist.m3u"
     proxy_url: null
     enabled: true
+  - name: "4gtv"
+    url: "http://iptv-4gtv-system:5050/?type=m3u&token=change-this-token&proxy=true"
+    proxy_url: null
+    enabled: false
   - name: "source-b"
     url: "https://example.com/playlist-b.m3u"
     proxy_url: null

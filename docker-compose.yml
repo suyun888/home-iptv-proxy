@@ -8,6 +8,19 @@ services:
     env_file:
       - ./config/xhsuhd.env
 
+  iptv-4gtv-system:
+    image: ${FOURGTV_IMAGE:-instituteiptv/iptv-4gtv-system:latest}
+    container_name: iptv-4gtv-system
+    restart: always
+    ports:
+      - "${FOURGTV_PORT:-19950}:5050"
+    volumes:
+      - ./config/4gtv-cache:/data/cache
+    environment:
+      SEGMENTS_WINDOW: "${FOURGTV_SEGMENTS_WINDOW:-8}"
+      FETCH_TIMEOUT: "${FOURGTV_FETCH_TIMEOUT:-4}"
+      ACCESS_TOKEN: "${FOURGTV_ACCESS_TOKEN:-change-this-token}"
+
   home-iptv-proxy:
     image: ghcr.io/suyun888/home-iptv-proxy:latest
     container_name: home-iptv-proxy
@@ -33,4 +46,4 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       DOCKER_API_VERSION: "1.40"
-    command: home-iptv-proxy --cleanup --interval 3600
+    command: home-iptv-proxy iptv-4gtv-system --cleanup --interval 3600

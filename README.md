@@ -13,6 +13,7 @@
 - 定时刷新远程订阅源
 - 提供网页后台，可直接增删改 `m3u` 地址并保存生效
 - 内置 `xhsuhd` 容器，可直接把 `http://xhsuhd:34567/xhslist.m3u` 作为固定上游源
+- 可选内置 `iptv-4gtv-system` 容器，可把 4GTV 输出作为上游源一起整理
 - 后台可直接保存 `xhsuhd` 的 `a1` / `web_session`，并一键重新应用到上游容器
 - 每条源可单独设置代理地址
 - 可整合 XMLTV 节目单，并自动在 `list.m3u` 写入 `x-tvg-url`
@@ -31,27 +32,41 @@ export XHS_A1="你的a1"
 export XHS_WEB_SESSION="你的web_session"
 ```
 
-2. 首次启动后打开后台页面，填入你自己的订阅源。
-3. 把 `signing_secret` 改成一串随机字符串。
-4. 启动：
+2. 如果要启用 4GTV，先准备访问 token：
+
+```bash
+export FOURGTV_ACCESS_TOKEN="你的Token"
+```
+
+默认 compose 会启动 `iptv-4gtv-system`，并预留上游源：
+
+```text
+http://iptv-4gtv-system:5050/?type=m3u&token=你的Token&proxy=true
+```
+
+首次启动后可在后台把 `4gtv` 这条源改成启用。
+
+3. 首次启动后打开后台页面，填入你自己的订阅源。
+4. 把 `signing_secret` 改成一串随机字符串。
+5. 启动：
 
 ```bash
 docker compose up -d
 ```
 
-5. 导入播放器：
+6. 导入播放器：
 
 ```text
 http://你的主机IP:28788/list.m3u
 ```
 
-6. 打开后台：
+7. 打开后台：
 
 ```text
 http://你的主机IP:28788/admin
 ```
 
-7. 如果你部署了 `CharmingEPG`，可在后台填写：
+8. 如果你部署了 `CharmingEPG`，可在后台填写：
 
 ```text
 节目单地址: http://你的主机IP:30008/all
@@ -82,6 +97,7 @@ http://你的主机IP:28788/admin
 - `xhsuhd` 需要有效的 `XHS_A1` 和 `XHS_WEB_SESSION`，否则列表可能为空
 - 后台保存后会同步写入 `config/xhsuhd.env`；启用一键应用的部署会直接重启 `xhsuhd` 让新 Cookie 生效
 - 在当前项目的 Docker 网络里，`xhsuhd` 的默认地址就是 `http://xhsuhd:34567/xhslist.m3u`
+- 在当前项目的 Docker 网络里，`iptv-4gtv-system` 的默认订阅地址就是 `http://iptv-4gtv-system:5050/?type=m3u&token=你的Token&proxy=true`
 - 如果 `CharmingEPG` 首次启动后 `/all` 暂时不可用，通常是在后台生成合并节目单，等几分钟再试
 - `epg_source_url` 支持 `http/https`，也支持容器内本地文件路径和简单通配，例如 `/epg/tvb/tvb_*.xml`
 - `epg.xml.gz` 会把节目单缓存到 `epg_cache_dir` 后再输出，适合播放器长期订阅
