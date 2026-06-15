@@ -1811,7 +1811,13 @@ async fn admin_page(
             "ok",
         ),
         "updated" => ("手动更新命令已执行完成，容器重启后版本号会自动刷新。", "ok"),
-        "update_error" => ("手动更新失败，请查看容器日志确认原因。", "error"),
+        "update_error" => (
+            query
+                .get("message")
+                .map(String::as_str)
+                .unwrap_or("手动更新失败，请查看容器日志确认原因。"),
+            "error",
+        ),
         "xhs_applied" => ("xhsuhd 凭证已重新应用，失效后可在这里直接替换。", "ok"),
         "xhs_apply_error" => ("xhsuhd 凭证应用失败，请查看容器日志确认原因。", "error"),
         "error" => ("保存失败，请检查输入内容后重试。", "error"),
@@ -2127,8 +2133,17 @@ async fn run_manual_update(State(state): State<AppState>) -> Result<Redirect, Ap
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!("manual update failed: {}", stderr.trim());
-        return Ok(Redirect::to("/admin?status=update_error"));
+        let message = stderr.trim();
+        warn!("manual update failed: {}", message);
+        let message = if message.is_empty() {
+            "手动更新失败，更新命令没有返回错误详情。"
+        } else {
+            message
+        };
+        return Ok(Redirect::to(&format!(
+            "/admin?status=update_error&message={}",
+            urlencoding::encode(message)
+        )));
     }
 
     Ok(Redirect::to("/admin?status=updated"))
