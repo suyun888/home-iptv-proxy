@@ -355,7 +355,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|err| anyhow::anyhow!(err.message.clone()))?;
 
-    refresh_channels(&state).await;
+    spawn_initial_refresh(state.clone());
     spawn_refresh_loop(state.clone());
     spawn_recording_loop(state.clone());
 
@@ -636,6 +636,12 @@ fn spawn_refresh_loop(state: AppState) {
             time::sleep(Duration::from_secs(minutes * 60)).await;
             refresh_channels(&state).await;
         }
+    });
+}
+
+fn spawn_initial_refresh(state: AppState) {
+    tokio::spawn(async move {
+        refresh_channels(&state).await;
     });
 }
 
