@@ -121,7 +121,7 @@ sources:
     proxy_url: null
     enabled: true
   - name: "4gtv"
-    url: "http://iptv-4gtv-system:5050/?type=m3u&token=${FOURGTV_ACCESS_TOKEN}&proxy=true"
+    url: "http://iptv-4gtv-system:5050/4gtv.m3u?token=${FOURGTV_ACCESS_TOKEN}"
     proxy_url: null
     enabled: false
 EOF

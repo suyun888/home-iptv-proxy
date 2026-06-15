@@ -41,7 +41,7 @@ export FOURGTV_ACCESS_TOKEN="你的Token"
 默认 compose 会启动 `iptv-4gtv-system`，并预留上游源：
 
 ```text
-http://iptv-4gtv-system:5050/?type=m3u&token=你的Token&proxy=true
+http://iptv-4gtv-system:5050/4gtv.m3u?token=你的Token
 ```
 
 首次启动后可在后台把 `4gtv` 这条源改成启用。
@@ -97,7 +97,7 @@ http://你的主机IP:28788/admin
 - `xhsuhd` 需要有效的 `XHS_A1` 和 `XHS_WEB_SESSION`，否则列表可能为空
 - 后台保存后会同步写入 `config/xhsuhd.env`；启用一键应用的部署会直接重启 `xhsuhd` 让新 Cookie 生效
 - 在当前项目的 Docker 网络里，`xhsuhd` 的默认地址就是 `http://xhsuhd:34567/xhslist.m3u`
-- 在当前项目的 Docker 网络里，`iptv-4gtv-system` 的默认订阅地址就是 `http://iptv-4gtv-system:5050/?type=m3u&token=你的Token&proxy=true`
+- 在当前项目的 Docker 网络里，`iptv-4gtv-system` 的默认订阅地址就是 `http://iptv-4gtv-system:5050/4gtv.m3u?token=你的Token`
 - 如果 `CharmingEPG` 首次启动后 `/all` 暂时不可用，通常是在后台生成合并节目单，等几分钟再试
 - `epg_source_url` 支持 `http/https`，也支持容器内本地文件路径和简单通配，例如 `/epg/tvb/tvb_*.xml`
 - `epg.xml.gz` 会把节目单缓存到 `epg_cache_dir` 后再输出，适合播放器长期订阅
