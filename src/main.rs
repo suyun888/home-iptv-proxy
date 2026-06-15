@@ -86,10 +86,12 @@ struct SourceConfig {
 struct Channel {
     id: String,
     name: String,
+    normalized_name: String,
     group: String,
     tvg_id: Option<String>,
     tvg_logo: Option<String>,
     source_name: String,
+    source_slug: String,
     source_proxy_url: Option<String>,
     upstream_url: String,
 }
@@ -165,6 +167,7 @@ struct RecordingTaskView {
 struct ChannelOptionView {
     id: String,
     name: String,
+    label: String,
     tvg_id: String,
     source_name: String,
 }
@@ -251,8 +254,10 @@ struct AdminSourceView {
 struct AdminChannelStatusView {
     id: String,
     name: String,
+    normalized_name: String,
     group: String,
     source_name: String,
+    source_slug: String,
     upstream_host: String,
     access_mode: String,
     proxy_region: String,
@@ -363,6 +368,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/txt", get(list_txt))
         .route("/epg.xml", get(epg_xml))
         .route("/epg.xml.gz", get(epg_xml_gz))
+        .route("/live/{source}/{id}", get(live_with_source))
         .route("/live/{id}", get(live))
         .route("/proxy/{id}", get(proxy))
         .route("/admin/epg/programmes", get(admin_epg_programmes))
@@ -682,7 +688,10 @@ async fn refresh_channels(state: &AppState) {
             Ok(result) => {
                 let mut unique_count = 0usize;
                 for channel in result.channels {
-                    let dedupe_key = format!("{}|{}", channel.name, channel.upstream_url);
+                    let dedupe_key = format!(
+                        "{}|{}|{}",
+                        channel.source_slug, channel.normalized_name, channel.upstream_url
+                    );
                     if seen_keys.insert(dedupe_key) {
                         by_id.insert(channel.id.clone(), channel.clone());
                         channels.push(channel);
@@ -727,7 +736,13 @@ async fn refresh_channels(state: &AppState) {
         }
     }
 
-    channels.sort_by(|a, b| a.group.cmp(&b.group).then(a.name.cmp(&b.name)));
+    channels.sort_by(|a, b| {
+        a.group
+            .cmp(&b.group)
+            .then(a.normalized_name.cmp(&b.normalized_name))
+            .then(a.source_slug.cmp(&b.source_slug))
+            .then(a.name.cmp(&b.name))
+    });
     let last_refresh_ok = !channels.is_empty() || errors.is_empty();
 
     let mut runtime = state.runtime.write().await;
@@ -811,14 +826,18 @@ async fn fetch_source_channels(
             tvg_logo: None,
         });
 
-        let id = build_channel_id(&source.name, &meta.name, line);
+        let normalized_name = normalize_channel_name(&meta.name);
+        let source_slug = slugify_source_name(&source.name);
+        let id = build_channel_id(&source_slug, &normalized_name, line);
         channels.push(Channel {
             id,
             name: meta.name,
+            normalized_name,
             group: meta.group,
             tvg_id: meta.tvg_id,
             tvg_logo: meta.tvg_logo,
             source_name: source.name.clone(),
+            source_slug,
             source_proxy_url: source.proxy_url.clone(),
             upstream_url: line.to_string(),
         });
@@ -875,13 +894,16 @@ fn extract_attr(line: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn build_channel_id(source_name: &str, channel_name: &str, upstream_url: &str) -> String {
-    let seed = format!("{source_name}:{channel_name}:{upstream_url}");
-    let mut mac = HmacSha256::new_from_slice(seed.as_bytes()).expect("valid hmac key");
-    mac.update(upstream_url.as_bytes());
-    let digest = mac.finalize().into_bytes();
-    let short = URL_SAFE_NO_PAD.encode(digest);
-    let slug = channel_name
+fn normalize_channel_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect::<String>()
+}
+
+fn slugify_source_name(source_name: &str) -> String {
+    let slug = source_name
+        .trim()
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -896,7 +918,35 @@ fn build_channel_id(source_name: &str, channel_name: &str, upstream_url: &str) -
         .take(6)
         .collect::<Vec<_>>()
         .join("-");
-    format!("{}-{}", slug, &short[..10])
+
+    if slug.is_empty() {
+        "source".to_string()
+    } else {
+        slug
+    }
+}
+
+fn build_channel_id(source_slug: &str, normalized_name: &str, upstream_url: &str) -> String {
+    let seed = format!("{source_slug}:{normalized_name}:{upstream_url}");
+    let mut mac = HmacSha256::new_from_slice(seed.as_bytes()).expect("valid hmac key");
+    mac.update(upstream_url.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    let short = URL_SAFE_NO_PAD.encode(digest);
+    let channel_slug = normalized_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("-");
+    let channel_slug = if channel_slug.is_empty() {
+        "channel"
+    } else {
+        &channel_slug
+    };
+    format!("{channel_slug}-{}", &short[..10])
 }
 
 async fn root() -> impl IntoResponse {
@@ -1495,11 +1545,14 @@ async fn list_m3u(
             body.push_str(&format!(r#" tvg-logo="{}""#, tvg_logo));
         }
         body.push_str(&format!(
-            r#" group-title="{}" source-name="{}""#,
-            channel.group, channel.source_name
+            r#" group-title="{}" source-name="{}" source-slug="{}""#,
+            channel.group, channel.source_name, channel.source_slug
         ));
-        body.push_str(&format!(",{}\n", channel.name));
-        body.push_str(&format!("{}/live/{}\n", base, channel.id));
+        body.push_str(&format!(",{} [{}]\n", channel.name, channel.source_name));
+        body.push_str(&format!(
+            "{}/live/{}/{}\n",
+            base, channel.source_slug, channel.id
+        ));
     }
 
     let mut response = Response::new(Body::from(body));
@@ -1532,8 +1585,14 @@ async fn list_txt(
     let mut body = String::new();
     for channel in &runtime.channels {
         body.push_str(&channel.name);
+        body.push_str(" [");
+        body.push_str(&channel.source_name);
+        body.push(']');
         body.push(',');
-        body.push_str(&format!("{}/live/{}", base, channel.id));
+        body.push_str(&format!(
+            "{}/live/{}/{}",
+            base, channel.source_slug, channel.id
+        ));
         body.push('\n');
     }
 
@@ -1556,6 +1615,33 @@ async fn live(
         runtime.by_id.get(&id).cloned()
     }
     .ok_or_else(|| AppError::not_found("channel not found"))?;
+
+    proxy_upstream(
+        &state,
+        &id,
+        &channel.upstream_url,
+        channel.source_proxy_url.as_deref(),
+        &headers,
+        &uri,
+    )
+    .await
+}
+
+async fn live_with_source(
+    State(state): State<AppState>,
+    Path((source, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Result<Response<Body>, AppError> {
+    let channel = {
+        let runtime = state.runtime.read().await;
+        runtime.by_id.get(&id).cloned()
+    }
+    .ok_or_else(|| AppError::not_found("channel not found"))?;
+
+    if channel.source_slug != source {
+        return Err(AppError::not_found("channel not found for source"));
+    }
 
     proxy_upstream(
         &state,
@@ -1738,6 +1824,7 @@ async fn admin_page(
             .map(|channel| ChannelOptionView {
                 id: channel.id.clone(),
                 name: channel.name.clone(),
+                label: format!("{} [{}]", channel.name, channel.source_name),
                 tvg_id: channel.tvg_id.clone().unwrap_or_default(),
                 source_name: channel.source_name.clone(),
             })
@@ -1762,8 +1849,10 @@ async fn admin_page(
                 AdminChannelStatusView {
                     id: channel.id.clone(),
                     name: channel.name.clone(),
+                    normalized_name: channel.normalized_name.clone(),
                     group: channel.group.clone(),
                     source_name: channel.source_name.clone(),
+                    source_slug: channel.source_slug.clone(),
                     upstream_host,
                     access_mode: source_stat
                         .map(|item| item.access_mode.clone())
@@ -2763,8 +2852,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
               <thead>
                 <tr>
                   <th>频道</th>
+                  <th>归并名</th>
                   <th>分组</th>
                   <th>来源</th>
+                  <th>源标识</th>
                   <th>上游主机</th>
                   <th>直连/代理</th>
                   <th>代理地区</th>
@@ -2915,8 +3006,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           if (!normalized) return true;
           return [
             item.name,
+            item.normalized_name,
             item.group,
             item.source_name,
+            item.source_slug,
             item.upstream_host
           ].join(" ").toLowerCase().includes(normalized);
         }})
@@ -2924,8 +3017,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           const row = document.createElement("tr");
           row.innerHTML =
             "<td>" + item.name + "</td>" +
+            "<td>" + item.normalized_name + "</td>" +
             "<td>" + item.group + "</td>" +
             "<td>" + item.source_name + "</td>" +
+            "<td>" + item.source_slug + "</td>" +
             "<td>" + item.upstream_host + "</td>" +
             "<td>" + item.access_mode + "</td>" +
             "<td>" + item.proxy_region + "</td>" +
@@ -2941,14 +3036,14 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 
     channels.forEach((channel) => {{
       const option = document.createElement("option");
-      option.value = channel.name;
-      option.label = channel.source_name ? channel.name + " (" + channel.source_name + ")" : channel.name;
+      option.value = channel.id;
+      option.label = channel.label;
       channelList.appendChild(option);
     }});
 
     function findChannelByInput() {{
       const value = channelInput.value.trim();
-      return channels.find((item) => item.name === value || item.id === value);
+      return channels.find((item) => item.id === value || item.label === value || item.name === value);
     }}
 
     function createRecording(programme, channel) {{
