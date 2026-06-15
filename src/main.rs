@@ -780,10 +780,10 @@ async fn fetch_source_channels(
             }
         }
     }
-    if let Some(err) = last_error {
-        if text.is_empty() {
-            return Err(err);
-        }
+    if let Some(err) = last_error
+        && text.is_empty()
+    {
+        return Err(err);
     }
 
     let mut channels = Vec::new();
@@ -844,10 +844,10 @@ fn parse_extinf(line: &str) -> M3uMeta {
         ..M3uMeta::default()
     };
 
-    if let Some(name) = line.split_once(',').map(|(_, name)| name.trim()) {
-        if !name.is_empty() {
-            meta.name = name.to_string();
-        }
+    if let Some(name) = line.split_once(',').map(|(_, name)| name.trim())
+        && !name.is_empty()
+    {
+        meta.name = name.to_string();
     }
 
     for key in ["group-title", "tvg-id", "tvg-logo"] {
@@ -1163,9 +1163,9 @@ async fn fetch_epg_to_file(
     Ok(())
 }
 
-async fn gzip_file(source_path: &PathBuf, target_path: &PathBuf) -> Result<(), AppError> {
-    let source_path = source_path.clone();
-    let target_path = target_path.clone();
+async fn gzip_file(source_path: &FsPath, target_path: &FsPath) -> Result<(), AppError> {
+    let source_path = source_path.to_path_buf();
+    let target_path = target_path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<(), AppError> {
         let input = std::fs::read(&source_path).map_err(AppError::internal)?;
         let tmp_path = temp_path_for(&target_path, "gzip");
@@ -1181,7 +1181,7 @@ async fn gzip_file(source_path: &PathBuf, target_path: &PathBuf) -> Result<(), A
     .map_err(AppError::internal)?
 }
 
-fn temp_path_for(path: &PathBuf, suffix: &str) -> PathBuf {
+fn temp_path_for(path: &FsPath, suffix: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_else(|_| Duration::from_secs(0))
