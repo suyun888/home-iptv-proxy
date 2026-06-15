@@ -106,4 +106,5 @@ http://你的主机IP:28788/admin
 - 网页后台保存后会直接写入 `config/sources.yaml`，并自动刷新频道列表
 - 默认 `docker-compose.yml` 和 `install.sh` 都会启用 `watchtower`，只监控 `home-iptv-proxy` 这一个容器
 - 后台版本区的“立即手动更新”依赖 `IPTV_UPDATE_COMMAND`，安装脚本生成的部署会自动注入；同时容器会挂载 Docker Socket 和 compose 文件
+- 如果旧版本手动更新一直失败，先在宿主机终端执行一次 `docker compose pull && docker compose up -d`，让容器获得新的 compose 文件挂载和更新命令
 - `/health` 现在也会返回 `version`、`auto_update_enabled`、`manual_update_enabled`
