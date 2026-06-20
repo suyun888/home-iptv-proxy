@@ -365,6 +365,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/channels", get(channels))
         .route("/m3u", get(list_m3u))
         .route("/list.m3u", get(list_m3u))
+        .route("/playlist.m3u", get(list_m3u))
         .route("/txt", get(list_txt))
         .route("/epg.xml", get(epg_xml))
         .route("/epg.xml.gz", get(epg_xml_gz))
@@ -561,6 +562,33 @@ fn source_fetch_candidates(source_url: &str) -> Vec<String> {
         "https://cdn.jsdelivr.net/gh/{owner}/{repo}@{branch}/{path}"
     ));
     candidates
+}
+
+fn rewrite_loopback_stream_url(source_url: &str, stream_url: &str) -> String {
+    let Ok(source) = Url::parse(source_url) else {
+        return stream_url.to_string();
+    };
+    let Ok(mut stream) = Url::parse(stream_url) else {
+        return stream_url.to_string();
+    };
+
+    let Some(host) = stream.host_str() else {
+        return stream_url.to_string();
+    };
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        return stream_url.to_string();
+    }
+
+    if stream.set_scheme(source.scheme()).is_err() {
+        return stream_url.to_string();
+    }
+    if stream.set_host(source.host_str()).is_err() {
+        return stream_url.to_string();
+    }
+    if stream.set_port(source.port()).is_err() {
+        return stream_url.to_string();
+    }
+    stream.to_string()
 }
 
 fn parse_version_from_cargo_toml(body: &str) -> Option<String> {
@@ -832,9 +860,10 @@ async fn fetch_source_channels(
             tvg_logo: None,
         });
 
+        let upstream_url = rewrite_loopback_stream_url(&source.url, line);
         let normalized_name = normalize_channel_name(&meta.name);
         let source_slug = slugify_source_name(&source.name);
-        let id = build_channel_id(&source_slug, &normalized_name, line);
+        let id = build_channel_id(&source_slug, &normalized_name, &upstream_url);
         channels.push(Channel {
             id,
             name: meta.name,
@@ -845,7 +874,7 @@ async fn fetch_source_channels(
             source_name: source.name.clone(),
             source_slug,
             source_proxy_url: source.proxy_url.clone(),
-            upstream_url: line.to_string(),
+            upstream_url,
         });
     }
 
