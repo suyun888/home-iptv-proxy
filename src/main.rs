@@ -1838,11 +1838,14 @@ async fn admin_page(
     let update_available = latest_version != current_version;
     let status = query.get("status").map(String::as_str).unwrap_or("");
     let (status_message, status_class) = match status {
-        "saved" => ("保存成功，已自动刷新频道列表。", "ok"),
+        "saved" => ("保存成功，频道列表正在后台刷新。", "ok"),
         "refreshed" => ("已重新抓取全部直播源，频道列表和诊断信息都已更新。", "ok"),
-        "saved_xhs_applied" => ("保存成功，并已把 xhsuhd 凭证应用到上游容器。", "ok"),
+        "saved_xhs_applied" => (
+            "保存成功，已把 xhsuhd 凭证应用到上游容器，频道列表正在后台刷新。",
+            "ok",
+        ),
         "saved_xhs_pending" => (
-            "保存成功，xhsuhd 凭证已写入配置，但当前部署未启用一键应用。",
+            "保存成功，频道列表正在后台刷新；xhsuhd 凭证已写入配置，但当前部署未启用一键应用。",
             "ok",
         ),
         "updated" => ("手动更新命令已执行完成，容器重启后版本号会自动刷新。", "ok"),
@@ -2138,7 +2141,12 @@ async fn save_admin(
     }
 
     sync_xhs_env_file(&state).await?;
-    refresh_channels(&state).await;
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            refresh_channels(&state).await;
+        }
+    });
     let status = if state.xhs_apply_command.is_some() {
         match run_xhs_apply_command(&state).await {
             Ok(()) => "saved_xhs_applied",
