@@ -37,6 +37,8 @@ use url::Url;
 
 type HmacSha256 = Hmac<Sha256>;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const ADMIN_CHANNEL_OPTION_LIMIT: usize = 500;
+const ADMIN_CHANNEL_DIAGNOSTIC_LIMIT: usize = 300;
 
 #[derive(Clone)]
 struct AppState {
@@ -1865,6 +1867,7 @@ async fn admin_page(
     let channels_json = serde_json::to_string(
         &channels_snapshot
             .iter()
+            .take(ADMIN_CHANNEL_OPTION_LIMIT)
             .map(|channel| ChannelOptionView {
                 id: channel.id.clone(),
                 name: channel.name.clone(),
@@ -1884,6 +1887,7 @@ async fn admin_page(
     let channel_statuses_json = serde_json::to_string(
         &channels_snapshot
             .iter()
+            .take(ADMIN_CHANNEL_DIAGNOSTIC_LIMIT)
             .map(|channel| {
                 let source_stat = source_stats_by_name.get(&channel.source_name);
                 let upstream_host = Url::parse(&channel.upstream_url)
@@ -2900,7 +2904,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         </div>
 
         <div class="panel-title" style="margin-top:28px;">整合频道总览</div>
-        <div class="sub">所有已经合并进本地订阅的频道都会列在这里，延迟显示的是所属源最近一次抓取耗时。</div>
+        <div class="sub">这里显示前 {channel_diagnostic_limit} 个频道用于快速诊断；录制候选显示前 {channel_option_limit} 个频道，完整频道仍会输出到本地订阅。</div>
         <div class="diagnostics" style="margin-top:14px;">
           <div class="diag-toolbar">
             <input id="channel-diagnostics-search" class="diag-search" placeholder="搜索频道名 / 分组 / 来源">
@@ -3232,7 +3236,9 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         source_statuses_json = data.source_statuses_json,
         channel_statuses_json = data.channel_statuses_json,
         channels_json = data.channels_json,
-        recordings_json = data.recordings_json
+        recordings_json = data.recordings_json,
+        channel_diagnostic_limit = ADMIN_CHANNEL_DIAGNOSTIC_LIMIT,
+        channel_option_limit = ADMIN_CHANNEL_OPTION_LIMIT
     ))
 }
 
