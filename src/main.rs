@@ -49,6 +49,7 @@ struct AppState {
     config: Arc<RwLock<Config>>,
     recordings: Arc<RwLock<Vec<RecordingTask>>>,
     runtime: Arc<RwLock<RuntimeState>>,
+    refresh_lock: Arc<Mutex<()>>,
     epg_cache_lock: Arc<Mutex<()>>,
     active_recordings: Arc<Mutex<HashSet<String>>>,
     app_version: Arc<String>,
@@ -267,6 +268,20 @@ struct AdminChannelStatusView {
     last_status: String,
 }
 
+#[derive(Deserialize)]
+struct ToggleSourceForm {
+    index: usize,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct ToggleSourceResponse {
+    ok: bool,
+    index: usize,
+    enabled: bool,
+    message: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct GeoLookupResponse {
     success: bool,
@@ -343,6 +358,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(RwLock::new(config)),
         recordings: Arc::new(RwLock::new(normalize_recordings(recordings))),
         runtime: Arc::new(RwLock::new(RuntimeState::default())),
+        refresh_lock: Arc::new(Mutex::new(())),
         epg_cache_lock: Arc::new(Mutex::new(())),
         active_recordings: Arc::new(Mutex::new(HashSet::new())),
         app_version: Arc::new(APP_VERSION.to_string()),
@@ -380,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/xhs/apply", post(apply_xhs_credentials))
         .route("/admin", get(admin_page))
         .route("/admin/save", post(save_admin))
+        .route("/admin/sources/toggle", post(toggle_source))
         .route("/admin/refresh", post(refresh_now))
         .route("/admin/update", post(run_manual_update))
         .with_state(state.clone());
@@ -656,6 +673,46 @@ async fn save_recordings(state: &AppState) -> Result<(), AppError> {
         .map_err(AppError::internal)
 }
 
+async fn persist_config(state: &AppState, new_config: Config) -> Result<(), AppError> {
+    let yaml = serde_yaml::to_string(&new_config).map_err(AppError::internal)?;
+    tokio::fs::write(&*state.config_path, yaml)
+        .await
+        .map_err(AppError::internal)?;
+
+    let mut config = state.config.write().await;
+    *config = new_config;
+    Ok(())
+}
+
+async fn prune_runtime_source(state: &AppState, source_name: &str) {
+    let mut runtime = state.runtime.write().await;
+    runtime
+        .channels
+        .retain(|channel| channel.source_name != source_name);
+    runtime
+        .by_id
+        .retain(|_, channel| channel.source_name != source_name);
+    if let Some(stat) = runtime
+        .source_stats
+        .iter_mut()
+        .find(|item| item.name == source_name)
+    {
+        stat.enabled = false;
+        stat.channel_count = 0;
+        stat.last_status = "已禁用".to_string();
+        stat.last_error.clear();
+        stat.last_refresh_at = format_now_local();
+    }
+    runtime.source_errors.remove(source_name);
+    runtime.last_refresh_ok = !runtime.channels.is_empty() || runtime.source_errors.is_empty();
+}
+
+fn spawn_channel_refresh(state: AppState) {
+    tokio::spawn(async move {
+        refresh_channels_serialized(&state).await;
+    });
+}
+
 fn spawn_refresh_loop(state: AppState) {
     tokio::spawn(async move {
         loop {
@@ -664,14 +721,14 @@ fn spawn_refresh_loop(state: AppState) {
                 config.refresh_minutes.unwrap_or(30).max(1)
             };
             time::sleep(Duration::from_secs(minutes * 60)).await;
-            refresh_channels(&state).await;
+            refresh_channels_serialized(&state).await;
         }
     });
 }
 
 fn spawn_initial_refresh(state: AppState) {
     tokio::spawn(async move {
-        refresh_channels(&state).await;
+        refresh_channels_serialized(&state).await;
     });
 }
 
@@ -684,6 +741,14 @@ fn spawn_recording_loop(state: AppState) {
             time::sleep(Duration::from_secs(30)).await;
         }
     });
+}
+
+async fn refresh_channels_serialized(state: &AppState) {
+    let Ok(_guard) = state.refresh_lock.try_lock() else {
+        info!("channel refresh already running; skipping duplicate request");
+        return;
+    };
+    refresh_channels(state).await;
 }
 
 async fn refresh_channels(state: &AppState) {
@@ -2134,23 +2199,10 @@ async fn save_admin(
         sources,
     };
 
-    let yaml = serde_yaml::to_string(&new_config).map_err(AppError::internal)?;
-    tokio::fs::write(&*state.config_path, yaml)
-        .await
-        .map_err(AppError::internal)?;
-
-    {
-        let mut config = state.config.write().await;
-        *config = new_config;
-    }
+    persist_config(&state, new_config).await?;
 
     sync_xhs_env_file(&state).await?;
-    tokio::spawn({
-        let state = state.clone();
-        async move {
-            refresh_channels(&state).await;
-        }
-    });
+    spawn_channel_refresh(state.clone());
     let status = if state.xhs_apply_command.is_some() {
         match run_xhs_apply_command(&state).await {
             Ok(()) => "saved_xhs_applied",
@@ -2163,6 +2215,37 @@ async fn save_admin(
         "saved_xhs_pending"
     };
     Ok(Redirect::to(&format!("/admin?status={status}")))
+}
+
+async fn toggle_source(
+    State(state): State<AppState>,
+    Json(form): Json<ToggleSourceForm>,
+) -> Result<Json<ToggleSourceResponse>, AppError> {
+    let mut config = state.config.read().await.clone();
+    let Some(source) = config.sources.get_mut(form.index) else {
+        return Err(AppError::bad_request("订阅源不存在，请刷新后台后再试"));
+    };
+
+    source.enabled = Some(form.enabled);
+    let source_name = source.name.clone();
+    persist_config(&state, config).await?;
+
+    if form.enabled {
+        spawn_channel_refresh(state.clone());
+    } else {
+        prune_runtime_source(&state, &source_name).await;
+    }
+
+    Ok(Json(ToggleSourceResponse {
+        ok: true,
+        index: form.index,
+        enabled: form.enabled,
+        message: if form.enabled {
+            "已启用，正在后台刷新这批频道。".to_string()
+        } else {
+            "已关闭，播放列表已立即移除这条源的频道。".to_string()
+        },
+    }))
 }
 
 async fn run_manual_update(State(state): State<AppState>) -> Result<Redirect, AppError> {
@@ -2197,7 +2280,7 @@ async fn run_manual_update(State(state): State<AppState>) -> Result<Redirect, Ap
 }
 
 async fn refresh_now(State(state): State<AppState>) -> Result<Redirect, AppError> {
-    refresh_channels(&state).await;
+    spawn_channel_refresh(state.clone());
     Ok(Redirect::to("/admin?status=refreshed"))
 }
 
@@ -3008,15 +3091,19 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       [...container.querySelectorAll(".source-card")].forEach((card, index) => {{
         card.querySelector(".source-badge").textContent = "Source " + (index + 1);
         card.querySelector('[data-role="enabled"]').value = String(index);
+        card.dataset.index = String(index);
       }});
     }}
 
     function addSourceRow(source = {{ name: "", url: "", proxy_url: "", enabled: true }}) {{
       const node = template.content.firstElementChild.cloneNode(true);
+      const enabledInput = node.querySelector('[data-role="enabled"]');
       node.querySelector('[data-role="name"]').value = source.name || "";
       node.querySelector('[data-role="url"]').value = source.url || "";
       node.querySelector('[data-role="proxy_url"]').value = source.proxy_url || "";
-      node.querySelector('[data-role="enabled"]').checked = source.enabled !== false;
+      enabledInput.checked = source.enabled !== false;
+      enabledInput.dataset.savedChecked = enabledInput.checked ? "true" : "false";
+      enabledInput.addEventListener("change", () => toggleSourceEnabled(node, enabledInput));
       node.querySelector(".remove-source").addEventListener("click", () => {{
         node.remove();
         if (!container.children.length) {{
@@ -3035,6 +3122,36 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     }}
 
     addButton.addEventListener("click", () => addSourceRow());
+
+    async function toggleSourceEnabled(card, input) {{
+      const index = Number(card.dataset.index || input.value);
+      const savedChecked = input.dataset.savedChecked === "true";
+      input.disabled = true;
+      const badge = card.querySelector(".source-badge");
+      const previousBadge = badge.textContent;
+      badge.textContent = previousBadge + " · 保存中";
+      try {{
+        const response = await fetch("/admin/sources/toggle", {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ index, enabled: input.checked }})
+        }});
+        if (!response.ok) {{
+          throw new Error(await response.text());
+        }}
+        const payload = await response.json();
+        input.dataset.savedChecked = payload.enabled ? "true" : "false";
+        badge.textContent = "Source " + (index + 1) + " · 已保存";
+        setTimeout(() => refreshIndexes(), 1200);
+      }} catch (error) {{
+        input.checked = savedChecked;
+        badge.textContent = "Source " + (index + 1) + " · 保存失败";
+        alert(error.message || "保存失败");
+        setTimeout(() => refreshIndexes(), 1600);
+      }} finally {{
+        input.disabled = false;
+      }}
+    }}
 
     function statusTag(label) {{
       if (label === "正常") return '<span class="tag ok">' + label + '</span>';
