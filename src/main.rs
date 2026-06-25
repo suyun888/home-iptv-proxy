@@ -10,7 +10,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, RawForm, State},
+    extract::{Multipart, Path, Query, RawForm, State},
     http::{HeaderMap, HeaderValue, Response, StatusCode, Uri},
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
@@ -398,6 +398,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/save", post(save_admin))
         .route("/admin/sources/toggle", post(toggle_source))
         .route("/admin/refresh", post(refresh_now))
+        .route("/admin/upload-source-file", post(upload_source_file))
         .route("/admin/update", post(run_manual_update))
         .with_state(state.clone());
 
@@ -859,49 +860,56 @@ async fn fetch_source_channels(
     source: &SourceConfig,
     user_agent: &str,
 ) -> anyhow::Result<FetchSourceResult> {
-    let client = match proxied_client(client, source.proxy_url.as_deref(), user_agent) {
-        Ok(client) => client,
-        Err(err) => return Err(anyhow::anyhow!(err.message)),
-    };
-    let mut last_error: Option<anyhow::Error> = None;
-    let mut text = String::new();
     let mut latency_ms = 0u64;
-    let candidates = source_fetch_candidates(&source.url);
-    'fetch: for candidate in candidates {
-        for attempt in 0..3 {
-            let start = std::time::Instant::now();
-            match client
-                .get(&candidate)
-                .timeout(Duration::from_secs(35))
-                .send()
-                .await
-            {
-                Ok(response) => match response.error_for_status() {
-                    Ok(response) => match response.text().await {
-                        Ok(body) => {
-                            latency_ms = start.elapsed().as_millis() as u64;
-                            text = body;
-                            last_error = None;
-                            break 'fetch;
-                        }
+    let text = if is_remote_url(&source.url) {
+        let client = match proxied_client(client, source.proxy_url.as_deref(), user_agent) {
+            Ok(client) => client,
+            Err(err) => return Err(anyhow::anyhow!(err.message)),
+        };
+        let mut last_error: Option<anyhow::Error> = None;
+        let mut body = String::new();
+        let candidates = source_fetch_candidates(&source.url);
+        'fetch: for candidate in candidates {
+            for attempt in 0..3 {
+                let start = std::time::Instant::now();
+                match client
+                    .get(&candidate)
+                    .timeout(Duration::from_secs(35))
+                    .send()
+                    .await
+                {
+                    Ok(response) => match response.error_for_status() {
+                        Ok(response) => match response.text().await {
+                            Ok(text) => {
+                                latency_ms = start.elapsed().as_millis() as u64;
+                                body = text;
+                                last_error = None;
+                                break 'fetch;
+                            }
+                            Err(err) => last_error = Some(anyhow::anyhow!(err)),
+                        },
                         Err(err) => last_error = Some(anyhow::anyhow!(err)),
                     },
                     Err(err) => last_error = Some(anyhow::anyhow!(err)),
-                },
-                Err(err) => last_error = Some(anyhow::anyhow!(err)),
-            }
+                }
 
-            if attempt < 2 {
-                time::sleep(Duration::from_millis(600 * (attempt as u64 + 1))).await;
+                if attempt < 2 {
+                    time::sleep(Duration::from_millis(600 * (attempt as u64 + 1))).await;
+                }
             }
         }
-    }
-    if let Some(err) = last_error
-        && text.is_empty()
-    {
-        return Err(err);
-    }
-
+        if let Some(err) = last_error
+            && body.is_empty()
+        {
+            return Err(err);
+        }
+        body
+    } else {
+        let start = std::time::Instant::now();
+        let body = tokio::fs::read_to_string(&source.url).await?;
+        latency_ms = start.elapsed().as_millis() as u64;
+        body
+    };
     let mut channels = Vec::new();
     let mut pending_meta: Option<M3uMeta> = None;
 
@@ -949,6 +957,10 @@ async fn fetch_source_channels(
         channels,
         latency_ms,
     })
+}
+
+fn is_remote_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
 }
 
 #[derive(Default)]
@@ -1906,6 +1918,7 @@ async fn admin_page(
     let status = query.get("status").map(String::as_str).unwrap_or("");
     let (status_message, status_class) = match status {
         "saved" => ("保存成功，频道列表正在后台刷新。", "ok"),
+        "uploaded" => ("本地文件已上传并加入源列表，频道列表正在后台刷新。", "ok"),
         "refreshed" => ("已重新抓取全部直播源，频道列表和诊断信息都已更新。", "ok"),
         "saved_xhs_applied" => (
             "保存成功，已把 xhsuhd 凭证应用到上游容器，频道列表正在后台刷新。",
@@ -2200,7 +2213,6 @@ async fn save_admin(
     };
 
     persist_config(&state, new_config).await?;
-
     sync_xhs_env_file(&state).await?;
     spawn_channel_refresh(state.clone());
     let status = if state.xhs_apply_command.is_some() {
@@ -2246,6 +2258,149 @@ async fn toggle_source(
             "已关闭，播放列表已立即移除这条源的频道。".to_string()
         },
     }))
+}
+
+async fn upload_source_file(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<Redirect, AppError> {
+    let mut source_name = String::new();
+    let mut proxy_url: Option<String> = None;
+    let mut enabled = true;
+    let mut uploaded_file: Option<(String, Vec<u8>)> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(AppError::internal)? {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "source_name" => {
+                source_name = field
+                    .text()
+                    .await
+                    .map_err(AppError::internal)?
+                    .trim()
+                    .to_string();
+            }
+            "source_proxy_url" => {
+                proxy_url = clean_optional(Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(AppError::internal)?
+                        .trim()
+                        .to_string(),
+                ));
+            }
+            "source_enabled" => {
+                let value = field.text().await.map_err(AppError::internal)?;
+                enabled = matches!(value.trim(), "1" | "true" | "on" | "yes");
+            }
+            "source_file" => {
+                let filename = field
+                    .file_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "source.m3u".to_string());
+                let data = field.bytes().await.map_err(AppError::internal)?.to_vec();
+                uploaded_file = Some((filename, data));
+            }
+            _ => {}
+        }
+    }
+
+    let (filename, file_bytes) =
+        uploaded_file.ok_or_else(|| AppError::bad_request("请选择一个本地 txt 或 m3u 文件"))?;
+    if file_bytes.is_empty() {
+        return Err(AppError::bad_request("上传文件不能为空"));
+    }
+
+    let safe_name = sanitize_upload_name(&filename);
+    if !matches_source_file_name(&safe_name) {
+        return Err(AppError::bad_request(
+            "仅支持 .txt / .m3u / .m3u8 文件，请重新选择",
+        ));
+    }
+
+    let upload_dir = source_upload_dir(&state)?;
+    tokio::fs::create_dir_all(&upload_dir)
+        .await
+        .map_err(AppError::internal)?;
+    let stored_path = unique_upload_path(&upload_dir, &safe_name);
+    tokio::fs::write(&stored_path, file_bytes)
+        .await
+        .map_err(AppError::internal)?;
+
+    let mut new_config = state.config.read().await.clone();
+    let default_name = stored_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("local-upload")
+        .to_string();
+    new_config.sources.push(SourceConfig {
+        name: if source_name.trim().is_empty() {
+            default_name
+        } else {
+            source_name
+        },
+        url: stored_path.to_string_lossy().to_string(),
+        proxy_url,
+        enabled: Some(enabled),
+    });
+
+    persist_config(&state, new_config).await?;
+
+    Ok(Redirect::to("/admin?status=uploaded"))
+}
+
+fn source_upload_dir(state: &AppState) -> Result<PathBuf, AppError> {
+    let config_dir = FsPath::new(state.config_path.as_ref())
+        .parent()
+        .ok_or_else(|| AppError::internal("invalid config path"))?;
+    Ok(config_dir.join("uploads"))
+}
+
+fn sanitize_upload_name(filename: &str) -> String {
+    let mut cleaned = filename
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '-',
+        })
+        .collect::<String>();
+    if cleaned.is_empty() {
+        cleaned = "source.m3u".to_string();
+    }
+    cleaned
+}
+
+fn matches_source_file_name(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower.ends_with(".txt") || lower.ends_with(".m3u") || lower.ends_with(".m3u8")
+}
+
+fn unique_upload_path(dir: &FsPath, filename: &str) -> PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let stem = FsPath::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("source");
+    let ext = FsPath::new(filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    for idx in 1..1000 {
+        let alt_name = if ext.is_empty() {
+            format!("{stem}-{idx}")
+        } else {
+            format!("{stem}-{idx}.{ext}")
+        };
+        let alt = dir.join(alt_name);
+        if !alt.exists() {
+            return alt;
+        }
+    }
+    dir.join(format!("{}-{}.{}", stem, Local::now().timestamp(), ext))
 }
 
 async fn run_manual_update(State(state): State<AppState>) -> Result<Redirect, AppError> {
@@ -2952,6 +3107,32 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           </div>
 
           <div class="panel-title">M3U 源列表</div>
+          <div class="source-card" style="margin-bottom:16px;">
+            <form method="post" action="/admin/upload-source-file" enctype="multipart/form-data">
+              <div class="source-grid">
+                <div class="field">
+                  <label for="upload-source-name">本地源名称</label>
+                  <input id="upload-source-name" name="source_name" placeholder="例如 本地备份源">
+                </div>
+                <div class="field">
+                  <label for="upload-source-file">上传 txt / m3u 文件</label>
+                  <input id="upload-source-file" name="source_file" type="file" accept=".txt,.m3u,.m3u8,text/plain,application/vnd.apple.mpegurl,audio/x-mpegurl">
+                </div>
+                <div class="field">
+                  <label for="upload-source-proxy">代理地址（可选）</label>
+                  <input id="upload-source-proxy" name="source_proxy_url" placeholder="http://127.0.0.1:7890">
+                </div>
+              </div>
+              <label class="toggle" style="margin-top:12px;">
+                <input type="checkbox" name="source_enabled" value="1" checked>
+                上传后立即启用这条本地源
+              </label>
+              <div class="actions" style="margin-top:12px;">
+                <button class="ghost" type="submit">上传本地源文件</button>
+              </div>
+              <div class="footer-note">上传后的文件会保存到服务器配置目录下的 <code>uploads/</code>，并作为本地 M3U/TXT 源参与合并。</div>
+            </form>
+          </div>
           <div class="sources" id="sources"></div>
 
           <div class="actions">
