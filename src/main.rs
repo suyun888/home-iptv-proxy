@@ -104,6 +104,7 @@ struct Channel {
     name: String,
     normalized_name: String,
     group: String,
+    output_group: String,
     tvg_id: Option<String>,
     tvg_logo: Option<String>,
     source_name: String,
@@ -323,6 +324,19 @@ struct SaveChannelRefreshResponse {
     message: String,
 }
 
+#[derive(Deserialize)]
+struct RefreshChannelNowForm {
+    channel_id: String,
+}
+
+#[derive(Serialize)]
+struct RefreshChannelNowResponse {
+    ok: bool,
+    channel_id: String,
+    source_name: String,
+    message: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct GeoLookupResponse {
     success: bool,
@@ -441,6 +455,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/save", post(save_admin))
         .route("/admin/sources/toggle", post(toggle_source))
         .route("/admin/channel-refresh", post(save_channel_refresh))
+        .route("/admin/channel-refresh/now", post(refresh_channel_now))
         .route("/admin/refresh", post(refresh_now))
         .route("/admin/upload-source-file", post(upload_source_file))
         .route("/admin/update", post(run_manual_update))
@@ -1224,6 +1239,7 @@ async fn fetch_source_channels(
 
         let upstream_url = rewrite_loopback_stream_url(&source.url, line);
         let normalized_name = normalize_channel_name(&meta.name);
+        let output_group = classify_channel_group(&meta.name, &meta.group, &source.name);
         let source_slug = slugify_source_name(&source.name);
         let id = build_channel_id(&source_slug, &normalized_name, &upstream_url);
         channels.push(Channel {
@@ -1231,6 +1247,7 @@ async fn fetch_source_channels(
             name: meta.name,
             normalized_name,
             group: meta.group,
+            output_group,
             tvg_id: meta.tvg_id,
             tvg_logo: meta.tvg_logo,
             source_name: source.name.clone(),
@@ -1301,6 +1318,81 @@ fn normalize_channel_name(name: &str) -> String {
         .filter(|c| !c.is_whitespace())
         .flat_map(|c| c.to_lowercase())
         .collect::<String>()
+}
+
+fn classify_channel_group(name: &str, original_group: &str, source_name: &str) -> String {
+    let text = format!(
+        "{} {} {}",
+        name.to_lowercase(),
+        original_group.to_lowercase(),
+        source_name.to_lowercase()
+    );
+
+    let contains_any = |patterns: &[&str]| patterns.iter().any(|pattern| text.contains(pattern));
+
+    if contains_any(&["世界杯回放", "world cup replay", "fifa replay", "回放"]) {
+        return "世界杯回放".to_string();
+    }
+    if contains_any(&["cctv", "央视", "cgtn"]) {
+        return "央视".to_string();
+    }
+    if contains_any(&["卫视"]) {
+        return "卫视".to_string();
+    }
+    if contains_any(&[
+        "凤凰",
+        "翡翠台",
+        "本港台",
+        "j2",
+        "viutv",
+        "香港",
+        "hoy",
+        "tvb",
+    ]) {
+        return "香港".to_string();
+    }
+    if contains_any(&[
+        "台湾",
+        "台视",
+        "中视",
+        "华视",
+        "民视",
+        "东森",
+        "三立",
+        "纬来",
+        "八大",
+        "年代",
+        "爱尔达",
+        "靖天",
+        "4gtv",
+    ]) {
+        return "台湾".to_string();
+    }
+    if contains_any(&["4k", "uhd", "超高清"]) {
+        return "4K".to_string();
+    }
+    if contains_any(&["电影", "cinema", "movie", "amc", "影"]) {
+        return "电影".to_string();
+    }
+    if contains_any(&["体育", "sport", "espn", "eleven", "fox sports", "bein"]) {
+        return "体育".to_string();
+    }
+    if contains_any(&["新闻", "news", "财经", "bloomberg", "cnbc", "凤凰资讯"]) {
+        return "新闻".to_string();
+    }
+    if contains_any(&["少儿", "卡通", "kid", "kids", "动画", "亲子"]) {
+        return "少儿".to_string();
+    }
+    if contains_any(&["综艺", "娱乐", "show", "variety"]) {
+        return "综艺".to_string();
+    }
+    if contains_any(&["纪录", "history", "discovery", "animal", "nature"]) {
+        return "纪录".to_string();
+    }
+    if original_group.trim().is_empty() || original_group.eq_ignore_ascii_case("ungrouped") {
+        return "其它".to_string();
+    }
+    original_group.trim().to_string()
 }
 
 fn slugify_source_name(source_name: &str) -> String {
@@ -1970,7 +2062,7 @@ async fn list_m3u(
         }
         body.push_str(&format!(
             r#" group-title="{}" source-name="{}" source-slug="{}""#,
-            channel.group, channel.source_name, channel.source_slug
+            channel.output_group, channel.source_name, channel.source_slug
         ));
         body.push_str(&format!(
             r#" access-mode="{}""#,
@@ -2641,6 +2733,34 @@ async fn save_channel_refresh(
         } else {
             "已保存，这条频道的定时刷新已关闭。".to_string()
         },
+    }))
+}
+
+async fn refresh_channel_now(
+    State(state): State<AppState>,
+    Json(form): Json<RefreshChannelNowForm>,
+) -> Result<Json<RefreshChannelNowResponse>, AppError> {
+    let channel = {
+        let runtime = state.runtime.read().await;
+        runtime.by_id.get(&form.channel_id).cloned()
+    }
+    .ok_or_else(|| AppError::bad_request("频道不存在，请先刷新后台"))?;
+
+    refresh_selected_sources_serialized(&state, vec![channel.source_name.clone()]).await;
+
+    let mut refresh_runtime = state.channel_refresh_runtime.write().await;
+    refresh_runtime.insert(
+        form.channel_id.clone(),
+        ChannelRefreshRuntime {
+            last_refresh_at: Some(SystemTime::now()),
+        },
+    );
+
+    Ok(Json(RefreshChannelNowResponse {
+        ok: true,
+        channel_id: form.channel_id,
+        source_name: channel.source_name.clone(),
+        message: format!("已立即刷新频道所属源：{}", channel.source_name),
     }))
 }
 
@@ -3537,6 +3657,32 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       background: var(--error);
       border: 1px solid var(--error-line);
     }}
+    .toast-stack {{
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      z-index: 40;
+      display: grid;
+      gap: 10px;
+      width: min(360px, calc(100vw - 32px));
+    }}
+    .toast {{
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: var(--shadow-soft);
+      color: var(--ink);
+      animation: fadeUp .26s ease;
+    }}
+    .toast.ok {{
+      border-color: var(--ok-line);
+      background: rgba(240,255,244,0.96);
+    }}
+    .toast.error {{
+      border-color: var(--error-line);
+      background: rgba(255,245,245,0.96);
+    }}
     .footer-note {{
       margin-top: 18px;
       color: var(--muted);
@@ -3744,6 +3890,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 </head>
 <body>
   <div class="shell">
+    <div class="toast-stack" id="toast-stack"></div>
     <div class="hero">
       <div class="hero-kicker">Home IPTV Proxy</div>
       <h1>订阅中转后台</h1>
@@ -4099,6 +4246,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
                     <option value="直连">仅直连</option>
                     <option value="代理">仅代理</option>
                   </select>
+                  <label class="toggle" style="min-width:max-content;">
+                    <input id="channel-refresh-enabled-only" type="checkbox">
+                    仅看已启用刷新
+                  </label>
                 </div>
                 <div class="diag-table-wrap">
                   <table>
@@ -4117,6 +4268,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
                         <th>定时刷新</th>
                         <th>上次频道刷新</th>
                         <th>下次频道刷新</th>
+                        <th>操作</th>
                       </tr>
                     </thead>
                     <tbody id="channel-status-body"></tbody>
@@ -4279,6 +4431,20 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     const channelStatusBody = document.getElementById("channel-status-body");
     const channelDiagnosticsSearch = document.getElementById("channel-diagnostics-search");
     const channelModeFilter = document.getElementById("channel-mode-filter");
+    const channelRefreshEnabledOnly = document.getElementById("channel-refresh-enabled-only");
+    const toastStack = document.getElementById("toast-stack");
+
+    function showToast(message, kind = "ok") {{
+      const toast = document.createElement("div");
+      toast.className = "toast " + kind;
+      toast.textContent = message;
+      toastStack.appendChild(toast);
+      setTimeout(() => {{
+        toast.style.opacity = "0";
+        toast.style.transform = "translateY(-6px)";
+        setTimeout(() => toast.remove(), 220);
+      }}, 2600);
+    }}
 
     function showSection(sectionName) {{
       navTabs.forEach((button) => {{
@@ -4399,7 +4565,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     generateDomainLinksButton.addEventListener("click", () => {{
       const baseUrl = normalizeBaseUrl(domainGeneratorInput.value, domainGeneratorScheme.value);
       if (!baseUrl) {{
-        alert("先输入域名再生成");
+        showToast("先输入域名再生成", "error");
         return;
       }}
       publicBaseUrlInput.value = baseUrl;
@@ -4427,11 +4593,12 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         const payload = await response.json();
         input.dataset.savedChecked = payload.enabled ? "true" : "false";
         badge.textContent = "Source " + (index + 1) + " · 已保存";
+        showToast(payload.message, "ok");
         setTimeout(() => refreshIndexes(), 1200);
       }} catch (error) {{
         input.checked = savedChecked;
         badge.textContent = "Source " + (index + 1) + " · 保存失败";
-        alert(error.message || "保存失败");
+        showToast(error.message || "保存失败", "error");
         setTimeout(() => refreshIndexes(), 1600);
       }} finally {{
         input.disabled = false;
@@ -4462,12 +4629,13 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       }});
     }}
 
-    function renderChannelStatuses(keyword = "", mode = "") {{
+    function renderChannelStatuses(keyword = "", mode = "", enabledOnly = false) {{
       const normalized = keyword.trim().toLowerCase();
       channelStatusBody.innerHTML = "";
       channelStatuses
         .filter((item) => {{
           if (mode && item.access_mode !== mode) return false;
+          if (enabledOnly && !item.channel_refresh_enabled) return false;
           if (!normalized) return true;
           return [
             item.name,
@@ -4487,6 +4655,9 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
               <button class="ghost" type="button" data-channel-refresh-save="${{item.id}}">保存</button>
             </div>
           `;
+          const actionControl = `
+            <button class="ghost" type="button" data-channel-refresh-now="${{item.id}}">立即刷新</button>
+          `;
           row.innerHTML =
             "<td>" + item.name + "</td>" +
             "<td>" + item.normalized_name + "</td>" +
@@ -4500,7 +4671,8 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
             "<td>" + statusTag(item.last_status) + "</td>" +
             "<td>" + refreshControl + "</td>" +
             "<td data-channel-refresh-last-text=\"" + item.id + "\">" + (item.channel_last_refresh_at || "-") + "</td>" +
-            "<td data-channel-refresh-next-text=\"" + item.id + "\">" + (item.channel_next_refresh_at || "-") + "</td>";
+            "<td data-channel-refresh-next-text=\"" + item.id + "\">" + (item.channel_next_refresh_at || "-") + "</td>" +
+            "<td>" + actionControl + "</td>";
           channelStatusBody.appendChild(row);
         }});
       bindChannelRefreshActions();
@@ -4531,10 +4703,40 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
               target.channel_last_refresh_at = payload.enabled ? "待首次触发" : "-";
               target.channel_next_refresh_at = payload.enabled ? "待首次触发" : "已关闭";
             }}
-            alert(payload.message);
+            showToast(payload.message, "ok");
             rerenderChannelDiagnostics();
           }} catch (error) {{
-            alert(error.message || "保存失败");
+            showToast(error.message || "保存失败", "error");
+          }} finally {{
+            button.disabled = false;
+          }}
+        }};
+      }});
+      document.querySelectorAll("[data-channel-refresh-now]").forEach((button) => {{
+        button.onclick = async () => {{
+          const id = button.dataset.channelRefreshNow;
+          button.disabled = true;
+          try {{
+            const response = await fetch("/admin/channel-refresh/now", {{
+              method: "POST",
+              headers: {{ "Content-Type": "application/json" }},
+              body: JSON.stringify({{ channel_id: id }})
+            }});
+            if (!response.ok) {{
+              throw new Error(await response.text());
+            }}
+            const payload = await response.json();
+            const target = channelStatuses.find((item) => item.id === id);
+            if (target) {{
+              target.channel_last_refresh_at = "刚刚触发";
+              target.channel_next_refresh_at = target.channel_refresh_enabled
+                ? "按分钟数重新计算中"
+                : "已关闭";
+            }}
+            showToast(payload.message, "ok");
+            rerenderChannelDiagnostics();
+          }} catch (error) {{
+            showToast(error.message || "立即刷新失败", "error");
           }} finally {{
             button.disabled = false;
           }}
@@ -4545,10 +4747,15 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     renderSourceStatuses();
     renderChannelStatuses();
     function rerenderChannelDiagnostics() {{
-      renderChannelStatuses(channelDiagnosticsSearch.value, channelModeFilter.value);
+      renderChannelStatuses(
+        channelDiagnosticsSearch.value,
+        channelModeFilter.value,
+        channelRefreshEnabledOnly.checked
+      );
     }}
     channelDiagnosticsSearch.addEventListener("input", rerenderChannelDiagnostics);
     channelModeFilter.addEventListener("change", rerenderChannelDiagnostics);
+    channelRefreshEnabledOnly.addEventListener("change", rerenderChannelDiagnostics);
 
     channels.forEach((channel) => {{
       const option = document.createElement("option");
