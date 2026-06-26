@@ -49,6 +49,7 @@ struct AppState {
     config: Arc<RwLock<Config>>,
     recordings: Arc<RwLock<Vec<RecordingTask>>>,
     runtime: Arc<RwLock<RuntimeState>>,
+    channel_refresh_runtime: Arc<RwLock<HashMap<String, ChannelRefreshRuntime>>>,
     refresh_lock: Arc<Mutex<()>>,
     epg_cache_lock: Arc<Mutex<()>>,
     active_recordings: Arc<Mutex<HashSet<String>>>,
@@ -75,6 +76,8 @@ struct Config {
     xhs_web_session: Option<String>,
     signing_secret: String,
     sources: Vec<SourceConfig>,
+    #[serde(default)]
+    channel_refresh_rules: Vec<ChannelRefreshRule>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,6 +87,15 @@ struct SourceConfig {
     proxy_url: Option<String>,
     output_mode: Option<String>,
     enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ChannelRefreshRule {
+    channel_id: String,
+    minutes: u64,
+    enabled: bool,
+    channel_name: Option<String>,
+    source_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -270,6 +282,10 @@ struct AdminChannelStatusView {
     proxy_region: String,
     refresh_latency_ms: u64,
     last_status: String,
+    channel_refresh_enabled: bool,
+    channel_refresh_minutes: u64,
+    channel_last_refresh_at: String,
+    channel_next_refresh_at: String,
 }
 
 #[derive(Deserialize)]
@@ -283,6 +299,27 @@ struct ToggleSourceResponse {
     ok: bool,
     index: usize,
     enabled: bool,
+    message: String,
+}
+
+#[derive(Clone, Debug)]
+struct ChannelRefreshRuntime {
+    last_refresh_at: Option<SystemTime>,
+}
+
+#[derive(Deserialize)]
+struct SaveChannelRefreshForm {
+    channel_id: String,
+    minutes: u64,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct SaveChannelRefreshResponse {
+    ok: bool,
+    channel_id: String,
+    enabled: bool,
+    minutes: u64,
     message: String,
 }
 
@@ -362,6 +399,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(RwLock::new(config)),
         recordings: Arc::new(RwLock::new(normalize_recordings(recordings))),
         runtime: Arc::new(RwLock::new(RuntimeState::default())),
+        channel_refresh_runtime: Arc::new(RwLock::new(HashMap::new())),
         refresh_lock: Arc::new(Mutex::new(())),
         epg_cache_lock: Arc::new(Mutex::new(())),
         active_recordings: Arc::new(Mutex::new(HashSet::new())),
@@ -379,6 +417,7 @@ async fn main() -> anyhow::Result<()> {
 
     spawn_initial_refresh(state.clone());
     spawn_refresh_loop(state.clone());
+    spawn_channel_rule_refresh_loop(state.clone());
     spawn_recording_loop(state.clone());
 
     let app = Router::new()
@@ -401,6 +440,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin", get(admin_page))
         .route("/admin/save", post(save_admin))
         .route("/admin/sources/toggle", post(toggle_source))
+        .route("/admin/channel-refresh", post(save_channel_refresh))
         .route("/admin/refresh", post(refresh_now))
         .route("/admin/upload-source-file", post(upload_source_file))
         .route("/admin/update", post(run_manual_update))
@@ -753,6 +793,17 @@ fn spawn_refresh_loop(state: AppState) {
     });
 }
 
+fn spawn_channel_rule_refresh_loop(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(err) = tick_channel_refresh_rules(&state).await {
+                warn!("channel refresh rules failed: {}", err.message);
+            }
+            time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+}
+
 fn spawn_initial_refresh(state: AppState) {
     tokio::spawn(async move {
         refresh_channels_serialized(&state).await;
@@ -776,6 +827,14 @@ async fn refresh_channels_serialized(state: &AppState) {
         return;
     };
     refresh_channels(state).await;
+}
+
+async fn refresh_selected_sources_serialized(state: &AppState, source_names: Vec<String>) {
+    let Ok(_guard) = state.refresh_lock.try_lock() else {
+        info!("channel refresh already running; skipping duplicate request");
+        return;
+    };
+    refresh_selected_sources(state, &source_names).await;
 }
 
 async fn refresh_channels(state: &AppState) {
@@ -879,6 +938,208 @@ async fn refresh_channels(state: &AppState) {
     runtime.source_errors = errors;
     runtime.source_stats = source_stats;
     runtime.last_refresh_ok = last_refresh_ok;
+}
+
+async fn refresh_selected_sources(state: &AppState, source_names: &[String]) {
+    let targets = source_names.iter().cloned().collect::<HashSet<_>>();
+    if targets.is_empty() {
+        return;
+    }
+
+    let config = state.config.read().await.clone();
+    let user_agent = config
+        .user_agent
+        .clone()
+        .unwrap_or_else(|| "home-iptv-proxy/0.1".to_string());
+
+    let existing = state.runtime.read().await;
+    let mut channels = existing
+        .channels
+        .iter()
+        .filter(|channel| !targets.contains(&channel.source_name))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut by_id = channels
+        .iter()
+        .cloned()
+        .map(|channel| (channel.id.clone(), channel))
+        .collect::<HashMap<_, _>>();
+    let mut errors = existing
+        .source_errors
+        .iter()
+        .filter(|(name, _)| !targets.contains(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut source_stats = existing
+        .source_stats
+        .iter()
+        .filter(|item| !targets.contains(&item.name))
+        .cloned()
+        .collect::<Vec<_>>();
+    drop(existing);
+
+    let mut seen_keys = channels
+        .iter()
+        .map(|channel| {
+            format!(
+                "{}|{}|{}",
+                channel.source_slug, channel.normalized_name, channel.upstream_url
+            )
+        })
+        .collect::<HashSet<_>>();
+
+    for source in &config.sources {
+        if !targets.contains(&source.name) {
+            continue;
+        }
+
+        let enabled = source.enabled != Some(false);
+        let (access_mode, proxy_target, proxy_region) =
+            describe_access_mode(&state.client, source.proxy_url.as_deref()).await;
+        if !enabled {
+            source_stats.push(SourceRuntimeStat {
+                name: source.name.clone(),
+                url: source.url.clone(),
+                enabled: false,
+                channel_count: 0,
+                refresh_latency_ms: None,
+                last_status: "已禁用".to_string(),
+                last_error: String::new(),
+                last_refresh_at: format_now_local(),
+                access_mode,
+                proxy_target,
+                proxy_region,
+            });
+            continue;
+        }
+
+        match fetch_source_channels(&state.client, source, &user_agent).await {
+            Ok(result) => {
+                let mut unique_count = 0usize;
+                for channel in result.channels {
+                    let dedupe_key = format!(
+                        "{}|{}|{}",
+                        channel.source_slug, channel.normalized_name, channel.upstream_url
+                    );
+                    if seen_keys.insert(dedupe_key) {
+                        by_id.insert(channel.id.clone(), channel.clone());
+                        channels.push(channel);
+                        unique_count += 1;
+                    }
+                }
+                source_stats.push(SourceRuntimeStat {
+                    name: source.name.clone(),
+                    url: source.url.clone(),
+                    enabled: true,
+                    channel_count: unique_count,
+                    refresh_latency_ms: Some(result.latency_ms),
+                    last_status: if unique_count > 0 {
+                        "正常".to_string()
+                    } else {
+                        "已抓取但无频道".to_string()
+                    },
+                    last_error: String::new(),
+                    last_refresh_at: format_now_local(),
+                    access_mode,
+                    proxy_target,
+                    proxy_region,
+                });
+            }
+            Err(err) => {
+                warn!("source {} refresh failed: {}", source.name, err);
+                errors.insert(source.name.clone(), err.to_string());
+                source_stats.push(SourceRuntimeStat {
+                    name: source.name.clone(),
+                    url: source.url.clone(),
+                    enabled: true,
+                    channel_count: 0,
+                    refresh_latency_ms: None,
+                    last_status: "抓取失败".to_string(),
+                    last_error: err.to_string(),
+                    last_refresh_at: format_now_local(),
+                    access_mode,
+                    proxy_target,
+                    proxy_region,
+                });
+            }
+        }
+    }
+
+    channels.sort_by(|a, b| {
+        a.group
+            .cmp(&b.group)
+            .then(a.normalized_name.cmp(&b.normalized_name))
+            .then(a.source_slug.cmp(&b.source_slug))
+            .then(a.name.cmp(&b.name))
+    });
+    let last_refresh_ok = !channels.is_empty() || errors.is_empty();
+
+    let mut runtime = state.runtime.write().await;
+    runtime.channels = channels;
+    runtime.by_id = by_id;
+    runtime.source_errors = errors;
+    runtime.source_stats = source_stats;
+    runtime.last_refresh_ok = last_refresh_ok;
+}
+
+async fn tick_channel_refresh_rules(state: &AppState) -> Result<(), AppError> {
+    let config = state.config.read().await.clone();
+    if config.channel_refresh_rules.is_empty() {
+        return Ok(());
+    }
+
+    let runtime = state.runtime.read().await;
+    let mut due_sources = HashSet::new();
+    let now = SystemTime::now();
+    {
+        let refresh_runtime = state.channel_refresh_runtime.read().await;
+        for rule in &config.channel_refresh_rules {
+            if !rule.enabled || rule.minutes == 0 {
+                continue;
+            }
+            let Some(channel) = runtime.by_id.get(&rule.channel_id) else {
+                continue;
+            };
+            let due = match refresh_runtime
+                .get(&rule.channel_id)
+                .and_then(|item| item.last_refresh_at)
+            {
+                Some(last) => {
+                    now.duration_since(last).unwrap_or_default().as_secs()
+                        >= rule.minutes.max(1) * 60
+                }
+                None => true,
+            };
+            if due {
+                due_sources.insert(channel.source_name.clone());
+            }
+        }
+    }
+    drop(runtime);
+
+    if due_sources.is_empty() {
+        return Ok(());
+    }
+
+    let due_source_list = due_sources.iter().cloned().collect::<Vec<_>>();
+    refresh_selected_sources_serialized(state, due_source_list).await;
+
+    let runtime = state.runtime.read().await;
+    let mut refresh_runtime = state.channel_refresh_runtime.write().await;
+    let refreshed_at = SystemTime::now();
+    for rule in &config.channel_refresh_rules {
+        if let Some(channel) = runtime.by_id.get(&rule.channel_id)
+            && due_sources.contains(&channel.source_name)
+        {
+            refresh_runtime.insert(
+                rule.channel_id.clone(),
+                ChannelRefreshRuntime {
+                    last_refresh_at: Some(refreshed_at),
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn fetch_source_channels(
@@ -1657,6 +1918,28 @@ fn parse_xmltv_datetime(value: &str) -> Result<DateTime<FixedOffset>, AppError> 
         .map_err(|_| AppError::bad_request("节目单时间格式无效"))
 }
 
+fn format_system_time_local(value: SystemTime) -> String {
+    let datetime: DateTime<Local> = value.into();
+    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn format_next_refresh_at(
+    last_refresh_at: Option<SystemTime>,
+    minutes: u64,
+    enabled: bool,
+) -> String {
+    if !enabled {
+        return "已关闭".to_string();
+    }
+    let Some(last_refresh_at) = last_refresh_at else {
+        return "待首次触发".to_string();
+    };
+    match last_refresh_at.checked_add(Duration::from_secs(minutes.max(1) * 60)) {
+        Some(next) => format_system_time_local(next),
+        None => "-".to_string(),
+    }
+}
+
 async fn list_m3u(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1933,6 +2216,7 @@ async fn admin_page(
         let runtime = state.runtime.read().await;
         (runtime.channels.clone(), runtime.source_stats.clone())
     };
+    let channel_refresh_runtime = state.channel_refresh_runtime.read().await.clone();
     let current_version = state.app_version.as_ref().clone();
     let latest_version = fetch_latest_version(&state)
         .await
@@ -1987,12 +2271,25 @@ async fn admin_page(
         .iter()
         .map(|item| (item.name.clone(), item.clone()))
         .collect::<HashMap<_, _>>();
+    let refresh_rules_by_channel = config
+        .channel_refresh_rules
+        .iter()
+        .map(|item| (item.channel_id.clone(), item.clone()))
+        .collect::<HashMap<_, _>>();
     let channel_statuses_json = serde_json::to_string(
         &channels_snapshot
             .iter()
             .take(ADMIN_CHANNEL_DIAGNOSTIC_LIMIT)
             .map(|channel| {
                 let source_stat = source_stats_by_name.get(&channel.source_name);
+                let rule = refresh_rules_by_channel.get(&channel.id);
+                let refresh_runtime = channel_refresh_runtime.get(&channel.id);
+                let channel_refresh_enabled = rule.map(|item| item.enabled).unwrap_or(false);
+                let channel_refresh_minutes = rule.map(|item| item.minutes).unwrap_or(30);
+                let last_refresh_at = refresh_runtime
+                    .and_then(|item| item.last_refresh_at)
+                    .map(format_system_time_local)
+                    .unwrap_or_else(|| "-".to_string());
                 let upstream_host = Url::parse(&channel.upstream_url)
                     .ok()
                     .and_then(|url| url.host_str().map(str::to_string))
@@ -2017,6 +2314,14 @@ async fn admin_page(
                     last_status: source_stat
                         .map(|item| item.last_status.clone())
                         .unwrap_or_else(|| "未知".to_string()),
+                    channel_refresh_enabled,
+                    channel_refresh_minutes,
+                    channel_last_refresh_at: last_refresh_at,
+                    channel_next_refresh_at: format_next_refresh_at(
+                        refresh_runtime.and_then(|item| item.last_refresh_at),
+                        channel_refresh_minutes,
+                        channel_refresh_enabled,
+                    ),
                 }
             })
             .collect::<Vec<_>>(),
@@ -2246,6 +2551,7 @@ async fn save_admin(
         xhs_web_session: clean_optional(first_value(&values, "xhs_web_session")),
         signing_secret,
         sources,
+        channel_refresh_rules: state.config.read().await.channel_refresh_rules.clone(),
     };
 
     persist_config(&state, new_config).await?;
@@ -2292,6 +2598,48 @@ async fn toggle_source(
             "已启用，正在后台刷新这批频道。".to_string()
         } else {
             "已关闭，播放列表已立即移除这条源的频道。".to_string()
+        },
+    }))
+}
+
+async fn save_channel_refresh(
+    State(state): State<AppState>,
+    Json(form): Json<SaveChannelRefreshForm>,
+) -> Result<Json<SaveChannelRefreshResponse>, AppError> {
+    let mut config = state.config.read().await.clone();
+    let minutes = form.minutes.max(1);
+    let channel = {
+        let runtime = state.runtime.read().await;
+        runtime.by_id.get(&form.channel_id).cloned()
+    }
+    .ok_or_else(|| AppError::bad_request("频道不存在，请先刷新后台"))?;
+
+    config
+        .channel_refresh_rules
+        .retain(|item| item.channel_id != form.channel_id);
+    config.channel_refresh_rules.push(ChannelRefreshRule {
+        channel_id: form.channel_id.clone(),
+        minutes,
+        enabled: form.enabled,
+        channel_name: Some(channel.name.clone()),
+        source_name: Some(channel.source_name.clone()),
+    });
+    persist_config(&state, config).await?;
+
+    if form.enabled {
+        let mut refresh_runtime = state.channel_refresh_runtime.write().await;
+        refresh_runtime.remove(&form.channel_id);
+    }
+
+    Ok(Json(SaveChannelRefreshResponse {
+        ok: true,
+        channel_id: form.channel_id,
+        enabled: form.enabled,
+        minutes,
+        message: if form.enabled {
+            format!("已保存，每 {minutes} 分钟会按这条频道规则检查并刷新所属源。")
+        } else {
+            "已保存，这条频道的定时刷新已关闭。".to_string()
         },
     }))
 }
@@ -3766,6 +4114,9 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
                         <th>代理地区</th>
                         <th>延迟</th>
                         <th>状态</th>
+                        <th>定时刷新</th>
+                        <th>上次频道刷新</th>
+                        <th>下次频道刷新</th>
                       </tr>
                     </thead>
                     <tbody id="channel-status-body"></tbody>
@@ -4129,6 +4480,13 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         }})
         .forEach((item) => {{
           const row = document.createElement("tr");
+          const refreshControl = `
+            <div style="display:flex; gap:8px; align-items:center;">
+              <input type="checkbox" data-channel-refresh-enabled="${{item.id}}" ${{item.channel_refresh_enabled ? "checked" : ""}}>
+              <input type="number" min="1" value="${{item.channel_refresh_minutes || 30}}" data-channel-refresh-minutes="${{item.id}}" style="width:76px;">
+              <button class="ghost" type="button" data-channel-refresh-save="${{item.id}}">保存</button>
+            </div>
+          `;
           row.innerHTML =
             "<td>" + item.name + "</td>" +
             "<td>" + item.normalized_name + "</td>" +
@@ -4139,9 +4497,49 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
             "<td>" + item.access_mode + "</td>" +
             "<td>" + item.proxy_region + "</td>" +
             "<td>" + (item.refresh_latency_ms ? item.refresh_latency_ms + " ms" : "-") + "</td>" +
-            "<td>" + statusTag(item.last_status) + "</td>";
+            "<td>" + statusTag(item.last_status) + "</td>" +
+            "<td>" + refreshControl + "</td>" +
+            "<td data-channel-refresh-last-text=\"" + item.id + "\">" + (item.channel_last_refresh_at || "-") + "</td>" +
+            "<td data-channel-refresh-next-text=\"" + item.id + "\">" + (item.channel_next_refresh_at || "-") + "</td>";
           channelStatusBody.appendChild(row);
         }});
+      bindChannelRefreshActions();
+    }}
+
+    function bindChannelRefreshActions() {{
+      document.querySelectorAll("[data-channel-refresh-save]").forEach((button) => {{
+        button.onclick = async () => {{
+          const id = button.dataset.channelRefreshSave;
+          const enabled = document.querySelector(`[data-channel-refresh-enabled="${{id}}"]`)?.checked ?? false;
+          const minutesInput = document.querySelector(`[data-channel-refresh-minutes="${{id}}"]`);
+          const minutes = Number(minutesInput?.value || "30");
+          button.disabled = true;
+          try {{
+            const response = await fetch("/admin/channel-refresh", {{
+              method: "POST",
+              headers: {{ "Content-Type": "application/json" }},
+              body: JSON.stringify({{ channel_id: id, enabled, minutes }})
+            }});
+            if (!response.ok) {{
+              throw new Error(await response.text());
+            }}
+            const payload = await response.json();
+            const target = channelStatuses.find((item) => item.id === id);
+            if (target) {{
+              target.channel_refresh_enabled = payload.enabled;
+              target.channel_refresh_minutes = payload.minutes;
+              target.channel_last_refresh_at = payload.enabled ? "待首次触发" : "-";
+              target.channel_next_refresh_at = payload.enabled ? "待首次触发" : "已关闭";
+            }}
+            alert(payload.message);
+            rerenderChannelDiagnostics();
+          }} catch (error) {{
+            alert(error.message || "保存失败");
+          }} finally {{
+            button.disabled = false;
+          }}
+        }};
+      }});
     }}
 
     renderSourceStatuses();
