@@ -3215,6 +3215,84 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       display: grid;
       gap: 14px;
     }}
+    .section-stack {{
+      display: grid;
+      gap: 16px;
+    }}
+    .fold {{
+      border: 1px solid rgba(255,255,255,0.76);
+      border-radius: 24px;
+      background: rgba(255,255,255,0.82);
+      box-shadow: var(--shadow-soft);
+      overflow: hidden;
+    }}
+    .fold summary {{
+      list-style: none;
+      cursor: pointer;
+      padding: 18px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }}
+    .fold summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .fold-title {{
+      display: grid;
+      gap: 4px;
+    }}
+    .fold-label {{
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: -0.03em;
+    }}
+    .fold-meta {{
+      font-size: 13px;
+      color: var(--muted);
+    }}
+    .fold-chevron {{
+      width: 30px;
+      height: 30px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.04);
+      color: var(--muted);
+      font-size: 14px;
+      transition: transform .2s ease, background .2s ease;
+    }}
+    .fold[open] .fold-chevron {{
+      transform: rotate(180deg);
+      background: rgba(0,113,227,0.10);
+      color: var(--accent);
+    }}
+    .fold-body {{
+      padding: 0 20px 20px;
+      border-top: 1px solid rgba(60,60,67,0.08);
+    }}
+    .stats-row {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .mini-stat {{
+      padding: 14px 16px;
+      border-radius: 20px;
+      background: rgba(255,255,255,0.86);
+      border: 1px solid rgba(255,255,255,0.76);
+      box-shadow: var(--shadow-soft);
+      display: grid;
+      gap: 5px;
+    }}
+    .mini-stat .summary-label {{
+      font-size: 12px;
+    }}
+    .mini-stat .summary-value {{
+      text-align: left;
+      font-size: 18px;
+    }}
     .diag-toolbar {{
       display: flex;
       flex-wrap: wrap;
@@ -3306,7 +3384,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       }}
     }}
     @media (max-width: 760px) {{
-      .grid, .source-grid, .version-grid, .card-grid, .card-grid.three, .overview-grid, .quick-links {{
+      .grid, .source-grid, .version-grid, .card-grid, .card-grid.three, .overview-grid, .quick-links, .stats-row {{
         grid-template-columns: 1fr;
       }}
       .panel-head {{
@@ -3406,81 +3484,131 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           </div>
         </div>
         <div class="panel-body">
-          <div class="panel-title">添加源</div>
-          <div class="source-card" style="margin-bottom:16px;">
-            <div class="source-grid">
-              <div class="field">
-                <label for="quick-add-kind">添加方式</label>
-                <select id="quick-add-kind">
-                  <option value="remote">订阅源地址</option>
-                  <option value="local">本地 txt / m3u 文件</option>
-                </select>
-              </div>
+          <div class="section-stack">
+          <div class="stats-row">
+            <div class="mini-stat">
+              <div class="summary-label">输出入口</div>
+              <div class="summary-value">M3U / TXT / EPG</div>
             </div>
-            <div class="actions" style="margin-top:12px;">
-              <button class="ghost" type="button" id="quick-add-source">添加订阅源</button>
+            <div class="mini-stat">
+              <div class="summary-label">添加方式</div>
+              <div class="summary-value">远程源 / 本地文件</div>
             </div>
-            <div class="footer-note">选“订阅源地址”会在下方新增一条可编辑源；选“本地 txt / m3u 文件”会跳到上传表单，上传后会直接加入源列表。</div>
+            <div class="mini-stat">
+              <div class="summary-label">播放模式</div>
+              <div class="summary-value">直连 / 代理</div>
+            </div>
+            <div class="mini-stat">
+              <div class="summary-label">管理方式</div>
+              <div class="summary-value">汇总优先</div>
+            </div>
           </div>
 
-          <div class="source-card" style="margin-bottom:16px;">
-            <div class="source-grid">
-              <div class="field">
-                <label for="domain-generator-input">域名一键生成订阅源</label>
-                <input id="domain-generator-input" placeholder="例如 tv.example.com 或 https://tv.example.com">
+          <details class="fold">
+            <summary>
+              <div class="fold-title">
+                <div class="fold-label">快速添加</div>
+                <div class="fold-meta">常用入口放在这里，新增源或快速生成外部访问地址。</div>
               </div>
-              <div class="field">
-                <label for="domain-generator-scheme">协议</label>
-                <select id="domain-generator-scheme">
-                  <option value="https">https</option>
-                  <option value="http">http</option>
-                </select>
+              <span class="fold-chevron">⌄</span>
+            </summary>
+            <div class="fold-body">
+              <div class="source-card" style="margin-top:16px;margin-bottom:16px;">
+                <div class="source-grid">
+                  <div class="field">
+                    <label for="quick-add-kind">添加方式</label>
+                    <select id="quick-add-kind">
+                      <option value="remote">订阅源地址</option>
+                      <option value="local">本地 txt / m3u 文件</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="actions" style="margin-top:12px;">
+                  <button class="ghost" type="button" id="quick-add-source">添加订阅源</button>
+                </div>
+                <div class="footer-note">选“订阅源地址”会在下方新增一条可编辑源；选“本地 txt / m3u 文件”会跳到上传表单，上传后会直接加入源列表。</div>
               </div>
-              <div class="field">
-                <label>&nbsp;</label>
-                <button class="ghost" type="button" id="generate-domain-links">一键生成并回填</button>
+
+              <div class="source-card">
+                <div class="source-grid">
+                  <div class="field">
+                    <label for="domain-generator-input">域名一键生成订阅源</label>
+                    <input id="domain-generator-input" placeholder="例如 tv.example.com 或 https://tv.example.com">
+                  </div>
+                  <div class="field">
+                    <label for="domain-generator-scheme">协议</label>
+                    <select id="domain-generator-scheme">
+                      <option value="https">https</option>
+                      <option value="http">http</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label>&nbsp;</label>
+                    <button class="ghost" type="button" id="generate-domain-links">一键生成并回填</button>
+                  </div>
+                </div>
+                <div class="footer-note">会自动生成 <code>list.m3u</code>、<code>m3u</code>、<code>txt</code>、<code>epg.xml.gz</code> 和后台地址，并把“外部访问地址”回填成你输入的域名。</div>
+                <div class="link-list" id="generated-link-list"></div>
               </div>
             </div>
-            <div class="footer-note">会自动生成 <code>list.m3u</code>、<code>m3u</code>、<code>txt</code>、<code>epg.xml.gz</code> 和后台地址，并把“外部访问地址”回填成你输入的域名。</div>
-            <div class="link-list" id="generated-link-list"></div>
-          </div>
+          </details>
 
-          <form method="post" action="/admin/upload-source-file" enctype="multipart/form-data">
-            <div class="source-card" style="margin-bottom:16px;" id="upload-source-card">
-              <div class="source-grid">
-                <div class="field">
-                  <label for="upload-source-name">本地源名称</label>
-                  <input id="upload-source-name" name="source_name" placeholder="例如 本地备份源">
-                </div>
-                <div class="field">
-                  <label for="upload-source-file">上传 txt / m3u 文件</label>
-                  <input id="upload-source-file" name="source_file" type="file" accept=".txt,.m3u,.m3u8,text/plain,application/vnd.apple.mpegurl,audio/x-mpegurl">
-                </div>
-                <div class="field">
-                  <label for="upload-source-proxy">代理地址（可选）</label>
-                  <input id="upload-source-proxy" name="source_proxy_url" placeholder="http://127.0.0.1:7890">
-                </div>
-                <div class="field">
-                  <label for="upload-source-output-mode">输出方式</label>
-                  <select id="upload-source-output-mode" name="source_output_mode">
-                    <option value="proxy">代理输出</option>
-                    <option value="direct">直连输出</option>
-                  </select>
-                </div>
+          <details class="fold">
+            <summary>
+              <div class="fold-title">
+                <div class="fold-label">上传本地源</div>
+                <div class="fold-meta">上传 `.txt` / `.m3u` / `.m3u8`，并选择直连或代理输出。</div>
               </div>
-              <label class="toggle" style="margin-top:12px;">
-                <input type="checkbox" name="source_enabled" value="1" checked>
-                上传后立即启用这条本地源
-              </label>
-              <div class="actions" style="margin-top:12px;">
-                <button class="ghost" type="submit">上传本地源文件</button>
-              </div>
-              <div class="footer-note">上传后的文件会保存到服务器配置目录下的 <code>uploads/</code>，并作为本地 M3U/TXT 源参与合并。</div>
+              <span class="fold-chevron">⌄</span>
+            </summary>
+            <div class="fold-body">
+              <form method="post" action="/admin/upload-source-file" enctype="multipart/form-data">
+                <div class="source-card" style="margin-top:16px;" id="upload-source-card">
+                  <div class="source-grid">
+                    <div class="field">
+                      <label for="upload-source-name">本地源名称</label>
+                      <input id="upload-source-name" name="source_name" placeholder="例如 本地备份源">
+                    </div>
+                    <div class="field">
+                      <label for="upload-source-file">上传 txt / m3u 文件</label>
+                      <input id="upload-source-file" name="source_file" type="file" accept=".txt,.m3u,.m3u8,text/plain,application/vnd.apple.mpegurl,audio/x-mpegurl">
+                    </div>
+                    <div class="field">
+                      <label for="upload-source-proxy">代理地址（可选）</label>
+                      <input id="upload-source-proxy" name="source_proxy_url" placeholder="http://127.0.0.1:7890">
+                    </div>
+                    <div class="field">
+                      <label for="upload-source-output-mode">输出方式</label>
+                      <select id="upload-source-output-mode" name="source_output_mode">
+                        <option value="proxy">代理输出</option>
+                        <option value="direct">直连输出</option>
+                      </select>
+                    </div>
+                  </div>
+                  <label class="toggle" style="margin-top:12px;">
+                    <input type="checkbox" name="source_enabled" value="1" checked>
+                    上传后立即启用这条本地源
+                  </label>
+                  <div class="actions" style="margin-top:12px;">
+                    <button class="ghost" type="submit">上传本地源文件</button>
+                  </div>
+                  <div class="footer-note">上传后的文件会保存到服务器配置目录下的 <code>uploads/</code>，并作为本地 M3U/TXT 源参与合并。</div>
+                </div>
+              </form>
             </div>
-          </form>
+          </details>
 
+          <details class="fold" open>
+            <summary>
+              <div class="fold-title">
+                <div class="fold-label">详细配置与源列表</div>
+                <div class="fold-meta">默认展开当前最常用区域，包含外部访问地址、节目单、Cookie 和所有源。</div>
+              </div>
+              <span class="fold-chevron">⌄</span>
+            </summary>
+            <div class="fold-body">
           <form method="post" action="/admin/save">
-          <div class="grid">
+          <div class="grid" style="margin-top:16px;">
             <div class="field">
               <label for="public_base_url">外部访问地址（可选）</label>
               <input id="public_base_url" name="public_base_url" value="{public_base_url}" placeholder="例如 https://tv.example.com">
@@ -3538,6 +3666,9 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           </div>
           <div class="footer-note">{xhs_apply_hint}</div>
         </form>
+            </div>
+          </details>
+          </div>
         </div>
       </div>
       </div>
@@ -3551,60 +3682,99 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           </div>
         </div>
         <div class="panel-body">
-        <div class="panel-title">源抓取诊断</div>
-        <div class="sub">这里会直接告诉你每条源有没有抓到、抓到多少频道、耗时多少、是直连还是代理，以及代理出口地区。</div>
-        <div class="diagnostics" style="margin-top:14px;">
-          <div class="diag-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>源名称</th>
-                  <th>状态</th>
-                  <th>频道数</th>
-                  <th>耗时</th>
-                  <th>方式</th>
-                  <th>代理目标</th>
-                  <th>代理地区</th>
-                  <th>最后刷新</th>
-                  <th>错误</th>
-                </tr>
-              </thead>
-              <tbody id="source-status-body"></tbody>
-            </table>
+        <div class="section-stack">
+          <div class="stats-row">
+            <div class="mini-stat">
+              <div class="summary-label">诊断视角</div>
+              <div class="summary-value">源 / 频道</div>
+            </div>
+            <div class="mini-stat">
+              <div class="summary-label">输出筛选</div>
+              <div class="summary-value">直连 / 代理</div>
+            </div>
+            <div class="mini-stat">
+              <div class="summary-label">默认呈现</div>
+              <div class="summary-value">汇总优先</div>
+            </div>
+            <div class="mini-stat">
+              <div class="summary-label">详情方式</div>
+              <div class="summary-value">下拉展开</div>
+            </div>
           </div>
-        </div>
 
-        <div class="panel-title" style="margin-top:28px;">整合频道总览</div>
-        <div class="sub">这里显示前 {channel_diagnostic_limit} 个频道用于快速诊断；录制候选显示前 {channel_option_limit} 个频道，完整频道仍会输出到本地订阅。</div>
-        <div class="diagnostics" style="margin-top:14px;">
-          <div class="diag-toolbar">
-            <input id="channel-diagnostics-search" class="diag-search" placeholder="搜索频道名 / 分组 / 来源">
-            <select id="channel-mode-filter" class="diag-filter">
-              <option value="">全部输出方式</option>
-              <option value="直连">仅直连</option>
-              <option value="代理">仅代理</option>
-            </select>
+          <details class="fold">
+            <summary>
+              <div class="fold-title">
+                <div class="fold-label">源抓取诊断</div>
+                <div class="fold-meta">查看每条源的频道数、抓取耗时、访问方式和地区信息。</div>
+              </div>
+              <span class="fold-chevron">⌄</span>
+            </summary>
+            <div class="fold-body">
+              <div class="diagnostics" style="margin-top:16px;">
+                <div class="diag-table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>源名称</th>
+                        <th>状态</th>
+                        <th>频道数</th>
+                        <th>耗时</th>
+                        <th>方式</th>
+                        <th>代理目标</th>
+                        <th>代理地区</th>
+                        <th>最后刷新</th>
+                        <th>错误</th>
+                      </tr>
+                    </thead>
+                    <tbody id="source-status-body"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details class="fold" open>
+            <summary>
+              <div class="fold-title">
+                <div class="fold-label">整合频道总览</div>
+                <div class="fold-meta">显示前 {channel_diagnostic_limit} 个频道，便于快速搜索和按输出方式筛选。</div>
+              </div>
+              <span class="fold-chevron">⌄</span>
+            </summary>
+            <div class="fold-body">
+              <div class="diagnostics" style="margin-top:16px;">
+                <div class="diag-toolbar">
+                  <input id="channel-diagnostics-search" class="diag-search" placeholder="搜索频道名 / 分组 / 来源">
+                  <select id="channel-mode-filter" class="diag-filter">
+                    <option value="">全部输出方式</option>
+                    <option value="直连">仅直连</option>
+                    <option value="代理">仅代理</option>
+                  </select>
+                </div>
+                <div class="diag-table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>频道</th>
+                        <th>归并名</th>
+                        <th>分组</th>
+                        <th>来源</th>
+                        <th>源标识</th>
+                        <th>上游主机</th>
+                        <th>直连/代理</th>
+                        <th>代理地区</th>
+                        <th>延迟</th>
+                        <th>状态</th>
+                      </tr>
+                    </thead>
+                    <tbody id="channel-status-body"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </details>
           </div>
-          <div class="diag-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>频道</th>
-                  <th>归并名</th>
-                  <th>分组</th>
-                  <th>来源</th>
-                  <th>源标识</th>
-                  <th>上游主机</th>
-                  <th>直连/代理</th>
-                  <th>代理地区</th>
-                  <th>延迟</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody id="channel-status-body"></tbody>
-            </table>
-          </div>
-        </div>
         </div>
       </div>
       </div>
@@ -3618,30 +3788,71 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           </div>
         </div>
         <div class="panel-body">
-        <div class="panel-title">节目单录制</div>
-        <div class="grid">
-          <div class="field full">
-            <label for="record-channel">选择频道</label>
-            <input id="record-channel" list="record-channel-list" placeholder="输入频道名筛选">
-            <datalist id="record-channel-list"></datalist>
+        <div class="section-stack">
+          <div class="stats-row">
+            <div class="mini-stat">
+              <div class="summary-label">录制模式</div>
+              <div class="summary-value">按节目单排程</div>
+            </div>
+            <div class="mini-stat">
+              <div class="summary-label">时间控制</div>
+              <div class="summary-value">提前 / 延后</div>
+            </div>
+            <div class="mini-stat">
+              <div class="summary-label">查看方式</div>
+              <div class="summary-value">时间链展开</div>
+            </div>
+            <div class="mini-stat">
+              <div class="summary-label">任务列表</div>
+              <div class="summary-value">独立下拉</div>
+            </div>
           </div>
-          <div class="field">
-            <label for="record-pre">提前录制（分钟）</label>
-            <input id="record-pre" value="3" inputmode="numeric">
-          </div>
-          <div class="field">
-            <label for="record-post">延后结束（分钟）</label>
-            <input id="record-post" value="3" inputmode="numeric">
-          </div>
-        </div>
-        <div class="actions" style="margin-top:0;">
-          <button class="ghost" type="button" id="load-epg">查看节目时间链</button>
-        </div>
-        <div class="sources" id="epg-timeline"></div>
 
-        <div class="panel-title" style="margin-top:28px;">已创建录制任务</div>
-        <div class="sources" id="recording-list"></div>
+          <details class="fold" open>
+            <summary>
+              <div class="fold-title">
+                <div class="fold-label">节目单录制</div>
+                <div class="fold-meta">选择频道后查看节目时间链，再决定录制起止缓冲时间。</div>
+              </div>
+              <span class="fold-chevron">⌄</span>
+            </summary>
+            <div class="fold-body">
+              <div class="grid" style="margin-top:16px;">
+                <div class="field full">
+                  <label for="record-channel">选择频道</label>
+                  <input id="record-channel" list="record-channel-list" placeholder="输入频道名筛选">
+                  <datalist id="record-channel-list"></datalist>
+                </div>
+                <div class="field">
+                  <label for="record-pre">提前录制（分钟）</label>
+                  <input id="record-pre" value="3" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label for="record-post">延后结束（分钟）</label>
+                  <input id="record-post" value="3" inputmode="numeric">
+                </div>
+              </div>
+              <div class="actions" style="margin-top:0;">
+                <button class="ghost" type="button" id="load-epg">查看节目时间链</button>
+              </div>
+              <div class="sources" id="epg-timeline"></div>
+            </div>
+          </details>
+
+          <details class="fold">
+            <summary>
+              <div class="fold-title">
+                <div class="fold-label">已创建录制任务</div>
+                <div class="fold-meta">默认折叠，只有需要回看或删除任务时再展开。</div>
+              </div>
+              <span class="fold-chevron">⌄</span>
+            </summary>
+            <div class="fold-body">
+              <div class="sources" id="recording-list" style="margin-top:16px;"></div>
+            </div>
+          </details>
         <div class="footer-note">保存后会直接写入服务器配置文件，并重新抓取频道列表。节目单会按缓存策略落盘，`/epg.xml.gz` 适合给播放器长期订阅。</div>
+        </div>
         </div>
       </div>
       </div>
