@@ -2816,6 +2816,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       font-weight: 600;
       letter-spacing: 0.02em;
       box-shadow: var(--shadow-soft);
+      animation: fadeUp .7s ease both;
     }}
     .nav-tabs {{
       display: flex;
@@ -2832,6 +2833,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       background: rgba(255, 255, 255, 0.72);
       box-shadow: var(--shadow-soft);
       backdrop-filter: blur(22px) saturate(180%);
+      animation: fadeUp .8s ease both;
     }}
     .nav-tab {{
       border: 0;
@@ -2860,11 +2862,13 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       line-height: 1.02;
       letter-spacing: -0.05em;
       font-weight: 700;
+      animation: fadeUp .75s ease both;
     }}
     .hero .sub {{
       max-width: 780px;
       font-size: 17px;
       line-height: 1.5;
+      animation: fadeUp .85s ease both;
     }}
     .sub {{
       color: var(--muted);
@@ -2896,6 +2900,84 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     .panel-section.active {{
       display: grid;
       gap: 22px;
+      animation: sectionFade .34s ease;
+    }}
+    .overview-grid {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+      gap: 16px;
+      margin-bottom: 18px;
+    }}
+    .overview-hero {{
+      min-height: 230px;
+      padding: 24px;
+      border-radius: 28px;
+      border: 1px solid rgba(255,255,255,0.76);
+      background:
+        radial-gradient(circle at top right, rgba(0,113,227,0.12), transparent 30%),
+        linear-gradient(180deg, rgba(255,255,255,0.90), rgba(255,255,255,0.72));
+      box-shadow: var(--shadow-soft);
+      display: grid;
+      align-content: space-between;
+      gap: 16px;
+    }}
+    .overview-title {{
+      font-size: clamp(28px, 4vw, 38px);
+      line-height: 1.04;
+      letter-spacing: -0.05em;
+      font-weight: 700;
+      max-width: 10em;
+    }}
+    .overview-copy {{
+      max-width: 42em;
+    }}
+    .overview-side {{
+      display: grid;
+      gap: 16px;
+    }}
+    .summary-list {{
+      display: grid;
+      gap: 12px;
+    }}
+    .summary-item {{
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.84);
+      border: 1px solid rgba(255,255,255,0.76);
+      box-shadow: var(--shadow-soft);
+    }}
+    .summary-label {{
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+    }}
+    .summary-value {{
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      text-align: right;
+    }}
+    .quick-links {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }}
+    .quick-link {{
+      padding: 16px 18px;
+      border-radius: 22px;
+      background: rgba(255,255,255,0.84);
+      border: 1px solid rgba(255,255,255,0.76);
+      box-shadow: var(--shadow-soft);
+      display: grid;
+      gap: 6px;
+    }}
+    .quick-link strong {{
+      font-size: 16px;
+      letter-spacing: -0.02em;
     }}
     .version-grid {{
       display: grid;
@@ -2912,6 +2994,11 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       gap: 10px;
       min-height: 146px;
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
+      transition: transform .22s ease, box-shadow .22s ease;
+    }}
+    .stat-card:hover {{
+      transform: translateY(-2px);
+      box-shadow: 0 14px 28px rgba(0,0,0,0.08), inset 0 1px 0 rgba(255,255,255,0.7);
     }}
     .stat-kicker {{
       font-size: 11px;
@@ -3004,6 +3091,11 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       display: grid;
       gap: 14px;
       box-shadow: var(--shadow-soft);
+      transition: transform .2s ease, box-shadow .2s ease, background .2s ease;
+    }}
+    .source-card:hover {{
+      transform: translateY(-1px);
+      box-shadow: 0 16px 30px rgba(0,0,0,0.07);
     }}
     .source-top {{
       display: flex;
@@ -3193,8 +3285,28 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       background: #fdebea;
       color: #9b3d36;
     }}
+    @keyframes fadeUp {{
+      from {{
+        opacity: 0;
+        transform: translateY(16px);
+      }}
+      to {{
+        opacity: 1;
+        transform: translateY(0);
+      }}
+    }}
+    @keyframes sectionFade {{
+      from {{
+        opacity: 0;
+        transform: translateY(10px);
+      }}
+      to {{
+        opacity: 1;
+        transform: translateY(0);
+      }}
+    }}
     @media (max-width: 760px) {{
-      .grid, .source-grid, .version-grid, .card-grid, .card-grid.three {{
+      .grid, .source-grid, .version-grid, .card-grid, .card-grid.three, .overview-grid, .quick-links {{
         grid-template-columns: 1fr;
       }}
       .panel-head {{
@@ -3228,9 +3340,40 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         </div>
         <div class="panel-body">
           {status_block}
-          <div class="section-lead">
-            <div class="panel-title" style="font-size:18px;margin-bottom:6px;">当前运行概览</div>
-            <div class="sub">这里保留版本、更新和镜像信息。整体视觉改成更轻的卡片风格，后面各个模块也会按同一套样式走。</div>
+          <div class="overview-grid">
+            <div class="overview-hero">
+              <div>
+                <div class="hero-kicker" style="animation:none;">Live Control Center</div>
+                <div class="overview-title" style="margin-top:14px;">把频道源、转发方式、录制入口收进一个更安静的面板。</div>
+              </div>
+              <div class="overview-copy sub">这一页保留版本、镜像和更新能力，但不再像传统表单后台那样拥挤。你可以从这里快速判断容器状态，再切到源管理或频道诊断继续操作。</div>
+            </div>
+            <div class="overview-side">
+              <div class="summary-list">
+                <div class="summary-item">
+                  <div class="summary-label">当前版本</div>
+                  <div class="summary-value">v{app_version}</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">最新版本</div>
+                  <div class="summary-value">v{latest_version}</div>
+                </div>
+                <div class="summary-item">
+                  <div class="summary-label">自动更新</div>
+                  <div class="summary-value">{auto_update_status}</div>
+                </div>
+              </div>
+              <div class="quick-links">
+                <div class="quick-link">
+                  <strong>源管理</strong>
+                  <div class="sub">新增远程源、本地文件和直连输出。</div>
+                </div>
+                <div class="quick-link">
+                  <strong>频道诊断</strong>
+                  <div class="sub">查看聚合结果、方式、地区和抓取状态。</div>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="version-grid">
             <div class="stat-card">
