@@ -2766,93 +2766,136 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
   <title>home-iptv-proxy 后台</title>
   <style>
     :root {{
-      --bg: #f5efe4;
-      --panel: #fffdf8;
-      --line: #d9ccb7;
-      --ink: #2b241c;
-      --muted: #746759;
-      --accent: #c76b32;
-      --accent-dark: #9d4f20;
-      --ok: #e6f5ea;
-      --ok-line: #94c7a2;
-      --error: #fdebea;
-      --error-line: #dd8f89;
+      --bg: #f5f5f7;
+      --bg-secondary: #ffffff;
+      --panel: rgba(255, 255, 255, 0.78);
+      --line: rgba(60, 60, 67, 0.14);
+      --line-strong: rgba(60, 60, 67, 0.22);
+      --ink: #1d1d1f;
+      --muted: #6e6e73;
+      --accent: #0071e3;
+      --accent-dark: #0058b0;
+      --ok: rgba(52, 199, 89, 0.12);
+      --ok-line: rgba(52, 199, 89, 0.28);
+      --error: rgba(255, 59, 48, 0.10);
+      --error-line: rgba(255, 59, 48, 0.24);
+      --shadow: 0 18px 48px rgba(0, 0, 0, 0.08);
+      --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.06);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      font-family: "SF Pro Display", "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, #fff7ed 0, transparent 35%),
-        linear-gradient(180deg, #f9f3e8 0%, var(--bg) 100%);
+        radial-gradient(circle at top left, rgba(0, 113, 227, 0.10) 0, transparent 28%),
+        radial-gradient(circle at top right, rgba(175, 82, 222, 0.08) 0, transparent 26%),
+        linear-gradient(180deg, #fbfbfd 0%, var(--bg) 46%, #f2f2f7 100%);
     }}
     .shell {{
-      max-width: 1100px;
+      max-width: 1240px;
       margin: 0 auto;
-      padding: 32px 18px 56px;
+      padding: 36px 22px 64px;
     }}
     .hero {{
       display: grid;
-      gap: 10px;
-      margin-bottom: 22px;
+      gap: 12px;
+      margin-bottom: 24px;
+    }}
+    .hero-kicker {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.68);
+      border: 1px solid rgba(255,255,255,0.72);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      box-shadow: var(--shadow-soft);
     }}
     .nav-tabs {{
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
-      margin-bottom: 18px;
+      gap: 8px;
+      margin-bottom: 22px;
       position: sticky;
-      top: 0;
-      z-index: 5;
-      padding: 10px;
-      border: 1px solid rgba(217, 204, 183, 0.9);
-      border-radius: 18px;
-      background: rgba(255, 253, 248, 0.88);
-      backdrop-filter: blur(10px);
+      top: 12px;
+      z-index: 20;
+      width: fit-content;
+      padding: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      box-shadow: var(--shadow-soft);
+      backdrop-filter: blur(22px) saturate(180%);
     }}
     .nav-tab {{
-      border: 1px solid var(--line);
-      background: #fff7ef;
-      color: var(--ink);
+      border: 0;
+      background: transparent;
+      color: var(--muted);
       border-radius: 999px;
-      padding: 10px 14px;
+      padding: 10px 16px;
       font-size: 14px;
-      font-weight: 700;
+      font-weight: 600;
       cursor: pointer;
+      letter-spacing: -0.01em;
+      transition: background .2s ease, color .2s ease, box-shadow .2s ease, transform .2s ease;
     }}
     .nav-tab.active {{
-      background: var(--accent);
-      color: #fff;
-      border-color: var(--accent);
+      background: #ffffff;
+      color: var(--ink);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+    }}
+    .nav-tab:hover {{
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.68);
     }}
     h1 {{
       margin: 0;
-      font-size: clamp(28px, 5vw, 42px);
-      line-height: 1.05;
-      letter-spacing: -0.03em;
+      font-size: clamp(34px, 6vw, 52px);
+      line-height: 1.02;
+      letter-spacing: -0.05em;
+      font-weight: 700;
+    }}
+    .hero .sub {{
+      max-width: 780px;
+      font-size: 17px;
+      line-height: 1.5;
     }}
     .sub {{
       color: var(--muted);
-      font-size: 15px;
+      font-size: 14px;
+      line-height: 1.5;
+    }}
+    code {{
+      font-family: "SF Mono", "Menlo", monospace;
+      font-size: 0.94em;
+      padding: 2px 6px;
+      border-radius: 8px;
+      background: rgba(0, 0, 0, 0.045);
     }}
     .panel {{
-      background: rgba(255, 253, 248, 0.92);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: 0 18px 60px rgba(79, 51, 24, 0.09);
+      background: var(--panel);
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
       overflow: hidden;
+      backdrop-filter: blur(26px) saturate(180%);
     }}
     .stack {{
       display: grid;
-      gap: 18px;
+      gap: 22px;
     }}
     .panel-section {{
       display: none;
     }}
     .panel-section.active {{
       display: grid;
-      gap: 18px;
+      gap: 22px;
     }}
     .version-grid {{
       display: grid;
@@ -2861,48 +2904,59 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       align-items: start;
     }}
     .stat-card {{
-      border: 1px solid var(--line);
-      background: #fff;
-      border-radius: 18px;
-      padding: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      background: rgba(255, 255, 255, 0.86);
+      border-radius: 24px;
+      padding: 20px;
       display: grid;
-      gap: 8px;
-      min-height: 132px;
+      gap: 10px;
+      min-height: 146px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
     }}
     .stat-kicker {{
-      font-size: 12px;
+      font-size: 11px;
       color: var(--muted);
-      font-weight: 700;
+      font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.08em;
     }}
     .stat-value {{
-      font-size: 24px;
-      font-weight: 800;
-      line-height: 1.1;
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.05;
+      letter-spacing: -0.04em;
       word-break: break-word;
     }}
     .panel-head {{
       display: flex;
       justify-content: space-between;
-      align-items: center;
+      align-items: end;
       gap: 12px;
-      padding: 20px 22px;
-      border-bottom: 1px solid var(--line);
-      background: linear-gradient(135deg, rgba(199, 107, 50, 0.12), rgba(255,255,255,0));
+      padding: 24px 26px 18px;
+      border-bottom: 1px solid rgba(60, 60, 67, 0.08);
+      background: linear-gradient(180deg, rgba(255,255,255,0.48), rgba(255,255,255,0));
     }}
     .panel-title {{
-      font-size: 18px;
-      font-weight: 700;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: -0.03em;
+    }}
+    .section-lead {{
+      margin-bottom: 18px;
+      padding: 18px 20px;
+      border-radius: 22px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.85), rgba(255,255,255,0.68));
+      border: 1px solid rgba(255,255,255,0.72);
+      box-shadow: var(--shadow-soft);
     }}
     .panel-body {{
-      padding: 22px;
+      padding: 26px;
     }}
     .grid {{
       display: grid;
       gap: 16px;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      margin-bottom: 18px;
+      margin-bottom: 20px;
     }}
     .field {{
       display: grid;
@@ -2912,37 +2966,44 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       grid-column: 1 / -1;
     }}
     label {{
-      font-size: 13px;
+      font-size: 12px;
       color: var(--muted);
-      font-weight: 700;
-      letter-spacing: 0.02em;
+      font-weight: 600;
+      letter-spacing: -0.01em;
     }}
     input, select {{
       width: 100%;
-      border: 1px solid var(--line);
-      background: #fff;
-      border-radius: 14px;
-      padding: 12px 14px;
+      border: 1px solid rgba(60, 60, 67, 0.14);
+      background: rgba(255, 255, 255, 0.92);
+      border-radius: 16px;
+      padding: 13px 15px;
       font-size: 15px;
       color: var(--ink);
       outline: none;
+      transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
+    }}
+    input::placeholder {{
+      color: #8e8e93;
     }}
     input:focus, select:focus {{
-      border-color: var(--accent);
-      box-shadow: 0 0 0 4px rgba(199, 107, 50, 0.12);
+      border-color: rgba(0, 113, 227, 0.55);
+      box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.14);
+      background: #fff;
     }}
     .sources {{
       display: grid;
       gap: 14px;
-      margin-top: 10px;
+      margin-top: 12px;
     }}
     .source-card {{
-      border: 1px solid var(--line);
-      background: #fff;
-      border-radius: 18px;
-      padding: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.78);
+      background: rgba(255, 255, 255, 0.84);
+      border-radius: 24px;
+      padding: 18px;
       display: grid;
-      gap: 12px;
+      gap: 14px;
+      box-shadow: var(--shadow-soft);
     }}
     .source-top {{
       display: flex;
@@ -2951,59 +3012,66 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       gap: 10px;
     }}
     .source-badge {{
-      font-size: 12px;
+      font-size: 11px;
       color: var(--muted);
-      font-weight: 700;
+      font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.08em;
     }}
     .source-grid {{
       display: grid;
-      gap: 12px;
+      gap: 14px;
       grid-template-columns: 220px 1fr 1fr;
     }}
     .toggle {{
       display: inline-flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
       font-size: 14px;
       color: var(--ink);
+      font-weight: 500;
     }}
     .toggle input {{
       width: 18px;
       height: 18px;
       margin: 0;
+      accent-color: var(--accent);
     }}
     .actions {{
       display: flex;
       flex-wrap: wrap;
       gap: 12px;
-      margin-top: 22px;
+      margin-top: 24px;
     }}
     button {{
       border: 0;
       border-radius: 999px;
       padding: 12px 18px;
-      font-size: 15px;
-      font-weight: 700;
+      font-size: 14px;
+      font-weight: 600;
       cursor: pointer;
-      transition: transform .15s ease, opacity .15s ease, background .15s ease;
+      letter-spacing: -0.01em;
+      transition: transform .16s ease, opacity .16s ease, background .16s ease, box-shadow .16s ease;
     }}
     button:hover {{ transform: translateY(-1px); }}
     .primary {{
       background: var(--accent);
       color: #fff;
+      box-shadow: 0 8px 20px rgba(0, 113, 227, 0.28);
     }}
     .primary:hover {{
       background: var(--accent-dark);
     }}
     .ghost {{
-      background: #efe3d1;
+      background: rgba(255, 255, 255, 0.82);
       color: var(--ink);
+      border: 1px solid rgba(60, 60, 67, 0.12);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.72);
     }}
     .danger {{
-      background: #f7dfdc;
-      color: #7e3029;
+      background: rgba(255, 59, 48, 0.10);
+      color: #c1271a;
+      border: 1px solid rgba(255, 59, 48, 0.14);
     }}
     button:disabled {{
       opacity: 0.55;
@@ -3016,9 +3084,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     .notice {{
       margin-bottom: 18px;
       padding: 14px 16px;
-      border-radius: 16px;
+      border-radius: 18px;
       font-size: 14px;
       font-weight: 600;
+      backdrop-filter: blur(18px);
     }}
     .notice.ok {{
       background: var(--ok);
@@ -3032,6 +3101,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       margin-top: 18px;
       color: var(--muted);
       font-size: 13px;
+      line-height: 1.6;
     }}
     .link-list {{
       display: grid;
@@ -3041,10 +3111,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     .link-item {{
       display: grid;
       gap: 6px;
-      padding: 12px 14px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: #fff;
+      padding: 14px 16px;
+      border: 1px solid rgba(255, 255, 255, 0.76);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.84);
     }}
     .link-item code {{
       word-break: break-all;
@@ -3069,9 +3139,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     }}
     .diag-table-wrap {{
       overflow: auto;
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      background: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.76);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, 0.88);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.78);
     }}
     .card-grid {{
       display: grid;
@@ -3088,15 +3159,16 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     }}
     th, td {{
       text-align: left;
-      padding: 11px 12px;
-      border-bottom: 1px solid #efe3d1;
+      padding: 13px 14px;
+      border-bottom: 1px solid rgba(60, 60, 67, 0.08);
       font-size: 14px;
       vertical-align: top;
     }}
     th {{
-      background: #fbf5ea;
+      background: rgba(248, 248, 250, 0.94);
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
+      font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.06em;
       position: sticky;
@@ -3106,12 +3178,12 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     .tag {{
       display: inline-flex;
       align-items: center;
-      padding: 4px 10px;
+      padding: 5px 10px;
       border-radius: 999px;
       font-size: 12px;
-      font-weight: 700;
-      background: #f3e6d4;
-      color: #70431e;
+      font-weight: 600;
+      background: rgba(0, 0, 0, 0.05);
+      color: var(--ink);
     }}
     .tag.ok {{
       background: #e6f5ea;
@@ -3135,6 +3207,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 <body>
   <div class="shell">
     <div class="hero">
+      <div class="hero-kicker">Home IPTV Proxy</div>
       <h1>订阅中转后台</h1>
       <div class="sub">在这里维护上游 m3u 地址，保存后会自动刷新，本地订阅地址保持不变。</div>
     </div>
@@ -3155,6 +3228,10 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         </div>
         <div class="panel-body">
           {status_block}
+          <div class="section-lead">
+            <div class="panel-title" style="font-size:18px;margin-bottom:6px;">当前运行概览</div>
+            <div class="sub">这里保留版本、更新和镜像信息。整体视觉改成更轻的卡片风格，后面各个模块也会按同一套样式走。</div>
+          </div>
           <div class="version-grid">
             <div class="stat-card">
               <div class="stat-kicker">当前版本</div>
