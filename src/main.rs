@@ -4293,8 +4293,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         channel_statuses_json = data.channel_statuses_json,
         channels_json = data.channels_json,
         recordings_json = data.recordings_json,
-        channel_diagnostic_limit = ADMIN_CHANNEL_DIAGNOSTIC_LIMIT,
-        channel_option_limit = ADMIN_CHANNEL_OPTION_LIMIT
+        channel_diagnostic_limit = ADMIN_CHANNEL_DIAGNOSTIC_LIMIT
     ))
 }
 
