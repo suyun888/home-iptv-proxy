@@ -82,6 +82,7 @@ struct SourceConfig {
     name: String,
     url: String,
     proxy_url: Option<String>,
+    output_mode: Option<String>,
     enabled: Option<bool>,
 }
 
@@ -96,6 +97,7 @@ struct Channel {
     source_name: String,
     source_slug: String,
     source_proxy_url: Option<String>,
+    source_output_mode: String,
     upstream_url: String,
 }
 
@@ -248,8 +250,10 @@ struct EpgCachePaths {
 #[derive(Serialize)]
 struct AdminSourceView {
     name: String,
+    source_kind: String,
     url: String,
     proxy_url: String,
+    output_mode: String,
     enabled: bool,
 }
 
@@ -545,6 +549,28 @@ async fn describe_access_mode(
         ("代理".to_string(), target, region)
     } else {
         ("直连".to_string(), "-".to_string(), "本地出口".to_string())
+    }
+}
+
+fn normalize_output_mode(value: Option<&str>) -> &'static str {
+    match value.unwrap_or_default().trim() {
+        "direct" => "direct",
+        _ => "proxy",
+    }
+}
+
+fn output_mode_label(value: Option<&str>) -> &'static str {
+    match normalize_output_mode(value) {
+        "direct" => "直连",
+        _ => "代理",
+    }
+}
+
+fn channel_output_url(base: &str, channel: &Channel) -> String {
+    if channel.source_output_mode == "direct" {
+        channel.upstream_url.clone()
+    } else {
+        format!("{}/live/{}/{}", base, channel.source_slug, channel.id)
     }
 }
 
@@ -949,6 +975,7 @@ async fn fetch_source_channels(
             source_name: source.name.clone(),
             source_slug,
             source_proxy_url: source.proxy_url.clone(),
+            source_output_mode: normalize_output_mode(source.output_mode.as_deref()).to_string(),
             upstream_url,
         });
     }
@@ -1662,11 +1689,12 @@ async fn list_m3u(
             r#" group-title="{}" source-name="{}" source-slug="{}""#,
             channel.group, channel.source_name, channel.source_slug
         ));
-        body.push_str(&format!(",{} [{}]\n", channel.name, channel.source_name));
         body.push_str(&format!(
-            "{}/live/{}/{}\n",
-            base, channel.source_slug, channel.id
+            r#" access-mode="{}""#,
+            output_mode_label(Some(&channel.source_output_mode))
         ));
+        body.push_str(&format!(",{} [{}]\n", channel.name, channel.source_name));
+        body.push_str(&format!("{}\n", channel_output_url(&base, channel)));
     }
 
     let mut response = Response::new(Body::from(body));
@@ -1703,10 +1731,7 @@ async fn list_txt(
         body.push_str(&channel.source_name);
         body.push(']');
         body.push(',');
-        body.push_str(&format!(
-            "{}/live/{}/{}",
-            base, channel.source_slug, channel.id
-        ));
+        body.push_str(&channel_output_url(&base, channel));
         body.push('\n');
     }
 
@@ -2084,8 +2109,10 @@ async fn admin_page(
         sources: if config.sources.is_empty() {
             vec![AdminSourceView {
                 name: "xhsuhd".to_string(),
+                source_kind: "remote".to_string(),
                 url: "http://xhsuhd:34567/xhslist.m3u".to_string(),
                 proxy_url: String::new(),
+                output_mode: "proxy".to_string(),
                 enabled: true,
             }]
         } else {
@@ -2094,8 +2121,10 @@ async fn admin_page(
                 .into_iter()
                 .map(|source| AdminSourceView {
                     name: source.name,
+                    source_kind: detect_source_kind(&source.url).to_string(),
                     url: source.url,
                     proxy_url: source.proxy_url.unwrap_or_default(),
+                    output_mode: normalize_output_mode(source.output_mode.as_deref()).to_string(),
                     enabled: source.enabled != Some(false),
                 })
                 .collect()
@@ -2128,13 +2157,15 @@ async fn save_admin(
     let source_names = values.remove("source_name").unwrap_or_default();
     let source_urls = values.remove("source_url").unwrap_or_default();
     let source_proxy_urls = values.remove("source_proxy_url").unwrap_or_default();
+    let source_output_modes = values.remove("source_output_mode").unwrap_or_default();
     let enabled_flags = values.remove("source_enabled").unwrap_or_default();
 
     let mut sources = Vec::new();
     let row_count = source_names
         .len()
         .max(source_urls.len())
-        .max(source_proxy_urls.len());
+        .max(source_proxy_urls.len())
+        .max(source_output_modes.len());
     for idx in 0..row_count {
         let name = source_names
             .get(idx)
@@ -2148,6 +2179,10 @@ async fn save_admin(
             .get(idx)
             .map(|v| v.trim().to_string())
             .unwrap_or_default();
+        let output_mode = source_output_modes
+            .get(idx)
+            .map(|v| normalize_output_mode(Some(v.as_str())).to_string())
+            .unwrap_or_else(|| "proxy".to_string());
 
         if name.is_empty() && url.is_empty() && proxy_url.is_empty() {
             continue;
@@ -2165,6 +2200,7 @@ async fn save_admin(
             },
             url,
             proxy_url: clean_optional(Some(proxy_url)),
+            output_mode: Some(output_mode),
             enabled: Some(enabled),
         });
     }
@@ -2266,6 +2302,7 @@ async fn upload_source_file(
 ) -> Result<Redirect, AppError> {
     let mut source_name = String::new();
     let mut proxy_url: Option<String> = None;
+    let mut output_mode = "proxy".to_string();
     let mut enabled = true;
     let mut uploaded_file: Option<(String, Vec<u8>)> = None;
 
@@ -2289,6 +2326,12 @@ async fn upload_source_file(
                         .trim()
                         .to_string(),
                 ));
+            }
+            "source_output_mode" => {
+                output_mode = normalize_output_mode(Some(
+                    field.text().await.map_err(AppError::internal)?.trim(),
+                ))
+                .to_string();
             }
             "source_enabled" => {
                 let value = field.text().await.map_err(AppError::internal)?;
@@ -2342,6 +2385,7 @@ async fn upload_source_file(
         },
         url: stored_path.to_string_lossy().to_string(),
         proxy_url,
+        output_mode: Some(output_mode),
         enabled: Some(enabled),
     });
 
@@ -2552,6 +2596,17 @@ fn first_value(values: &HashMap<String, Vec<String>>, key: &str) -> Option<Strin
     values.get(key).and_then(|v| v.first()).cloned()
 }
 
+fn detect_source_kind(url: &str) -> &'static str {
+    if Url::parse(url)
+        .map(|parsed| matches!(parsed.scheme(), "http" | "https"))
+        .unwrap_or(false)
+    {
+        "remote"
+    } else {
+        "local"
+    }
+}
+
 fn looks_like_m3u(content_type: &str, path: &str) -> bool {
     content_type.contains("mpegurl")
         || content_type.contains("vnd.apple.mpegurl")
@@ -2742,6 +2797,35 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       gap: 10px;
       margin-bottom: 22px;
     }}
+    .nav-tabs {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 18px;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      padding: 10px;
+      border: 1px solid rgba(217, 204, 183, 0.9);
+      border-radius: 18px;
+      background: rgba(255, 253, 248, 0.88);
+      backdrop-filter: blur(10px);
+    }}
+    .nav-tab {{
+      border: 1px solid var(--line);
+      background: #fff7ef;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }}
+    .nav-tab.active {{
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }}
     h1 {{
       margin: 0;
       font-size: clamp(28px, 5vw, 42px);
@@ -2760,6 +2844,13 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       overflow: hidden;
     }}
     .stack {{
+      display: grid;
+      gap: 18px;
+    }}
+    .panel-section {{
+      display: none;
+    }}
+    .panel-section.active {{
       display: grid;
       gap: 18px;
     }}
@@ -2826,7 +2917,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       font-weight: 700;
       letter-spacing: 0.02em;
     }}
-    input {{
+    input, select {{
       width: 100%;
       border: 1px solid var(--line);
       background: #fff;
@@ -2836,7 +2927,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       color: var(--ink);
       outline: none;
     }}
-    input:focus {{
+    input:focus, select:focus {{
       border-color: var(--accent);
       box-shadow: 0 0 0 4px rgba(199, 107, 50, 0.12);
     }}
@@ -2942,6 +3033,22 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       color: var(--muted);
       font-size: 13px;
     }}
+    .link-list {{
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }}
+    .link-item {{
+      display: grid;
+      gap: 6px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }}
+    .link-item code {{
+      word-break: break-all;
+    }}
     .diagnostics {{
       display: grid;
       gap: 14px;
@@ -2956,11 +3063,23 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     .diag-search {{
       max-width: 320px;
     }}
+    .diag-filter {{
+      min-width: 180px;
+      max-width: 220px;
+    }}
     .diag-table-wrap {{
       overflow: auto;
       border: 1px solid var(--line);
       border-radius: 18px;
       background: #fff;
+    }}
+    .card-grid {{
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }}
+    .card-grid.three {{
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }}
     table {{
       width: 100%;
@@ -3003,7 +3122,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       color: #9b3d36;
     }}
     @media (max-width: 760px) {{
-      .grid, .source-grid, .version-grid {{
+      .grid, .source-grid, .version-grid, .card-grid, .card-grid.three {{
         grid-template-columns: 1fr;
       }}
       .panel-head {{
@@ -3019,7 +3138,14 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       <h1>订阅中转后台</h1>
       <div class="sub">在这里维护上游 m3u 地址，保存后会自动刷新，本地订阅地址保持不变。</div>
     </div>
+    <div class="nav-tabs" id="nav-tabs">
+      <button class="nav-tab active" type="button" data-section-target="overview">概览</button>
+      <button class="nav-tab" type="button" data-section-target="sources">源管理</button>
+      <button class="nav-tab" type="button" data-section-target="diagnostics">频道诊断</button>
+      <button class="nav-tab" type="button" data-section-target="recordings">EPG 与录制</button>
+    </div>
     <div class="stack">
+      <div class="panel-section active" data-section="overview">
       <div class="panel">
         <div class="panel-head">
           <div>
@@ -3049,7 +3175,9 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           </div>
         </div>
       </div>
+      </div>
 
+      <div class="panel-section" data-section="sources">
       <div class="panel">
         <div class="panel-head">
           <div>
@@ -3058,6 +3186,79 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           </div>
         </div>
         <div class="panel-body">
+          <div class="panel-title">添加源</div>
+          <div class="source-card" style="margin-bottom:16px;">
+            <div class="source-grid">
+              <div class="field">
+                <label for="quick-add-kind">添加方式</label>
+                <select id="quick-add-kind">
+                  <option value="remote">订阅源地址</option>
+                  <option value="local">本地 txt / m3u 文件</option>
+                </select>
+              </div>
+            </div>
+            <div class="actions" style="margin-top:12px;">
+              <button class="ghost" type="button" id="quick-add-source">添加订阅源</button>
+            </div>
+            <div class="footer-note">选“订阅源地址”会在下方新增一条可编辑源；选“本地 txt / m3u 文件”会跳到上传表单，上传后会直接加入源列表。</div>
+          </div>
+
+          <div class="source-card" style="margin-bottom:16px;">
+            <div class="source-grid">
+              <div class="field">
+                <label for="domain-generator-input">域名一键生成订阅源</label>
+                <input id="domain-generator-input" placeholder="例如 tv.example.com 或 https://tv.example.com">
+              </div>
+              <div class="field">
+                <label for="domain-generator-scheme">协议</label>
+                <select id="domain-generator-scheme">
+                  <option value="https">https</option>
+                  <option value="http">http</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>&nbsp;</label>
+                <button class="ghost" type="button" id="generate-domain-links">一键生成并回填</button>
+              </div>
+            </div>
+            <div class="footer-note">会自动生成 <code>list.m3u</code>、<code>m3u</code>、<code>txt</code>、<code>epg.xml.gz</code> 和后台地址，并把“外部访问地址”回填成你输入的域名。</div>
+            <div class="link-list" id="generated-link-list"></div>
+          </div>
+
+          <form method="post" action="/admin/upload-source-file" enctype="multipart/form-data">
+            <div class="source-card" style="margin-bottom:16px;" id="upload-source-card">
+              <div class="source-grid">
+                <div class="field">
+                  <label for="upload-source-name">本地源名称</label>
+                  <input id="upload-source-name" name="source_name" placeholder="例如 本地备份源">
+                </div>
+                <div class="field">
+                  <label for="upload-source-file">上传 txt / m3u 文件</label>
+                  <input id="upload-source-file" name="source_file" type="file" accept=".txt,.m3u,.m3u8,text/plain,application/vnd.apple.mpegurl,audio/x-mpegurl">
+                </div>
+                <div class="field">
+                  <label for="upload-source-proxy">代理地址（可选）</label>
+                  <input id="upload-source-proxy" name="source_proxy_url" placeholder="http://127.0.0.1:7890">
+                </div>
+                <div class="field">
+                  <label for="upload-source-output-mode">输出方式</label>
+                  <select id="upload-source-output-mode" name="source_output_mode">
+                    <option value="proxy">代理输出</option>
+                    <option value="direct">直连输出</option>
+                  </select>
+                </div>
+              </div>
+              <label class="toggle" style="margin-top:12px;">
+                <input type="checkbox" name="source_enabled" value="1" checked>
+                上传后立即启用这条本地源
+              </label>
+              <div class="actions" style="margin-top:12px;">
+                <button class="ghost" type="submit">上传本地源文件</button>
+              </div>
+              <div class="footer-note">上传后的文件会保存到服务器配置目录下的 <code>uploads/</code>，并作为本地 M3U/TXT 源参与合并。</div>
+            </div>
+          </form>
+
           <form method="post" action="/admin/save">
           <div class="grid">
             <div class="field">
@@ -3106,45 +3307,31 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
             </div>
           </div>
 
-          <div class="panel-title">M3U 源列表</div>
-          <div class="source-card" style="margin-bottom:16px;">
-            <form method="post" action="/admin/upload-source-file" enctype="multipart/form-data">
-              <div class="source-grid">
-                <div class="field">
-                  <label for="upload-source-name">本地源名称</label>
-                  <input id="upload-source-name" name="source_name" placeholder="例如 本地备份源">
-                </div>
-                <div class="field">
-                  <label for="upload-source-file">上传 txt / m3u 文件</label>
-                  <input id="upload-source-file" name="source_file" type="file" accept=".txt,.m3u,.m3u8,text/plain,application/vnd.apple.mpegurl,audio/x-mpegurl">
-                </div>
-                <div class="field">
-                  <label for="upload-source-proxy">代理地址（可选）</label>
-                  <input id="upload-source-proxy" name="source_proxy_url" placeholder="http://127.0.0.1:7890">
-                </div>
-              </div>
-              <label class="toggle" style="margin-top:12px;">
-                <input type="checkbox" name="source_enabled" value="1" checked>
-                上传后立即启用这条本地源
-              </label>
-              <div class="actions" style="margin-top:12px;">
-                <button class="ghost" type="submit">上传本地源文件</button>
-              </div>
-              <div class="footer-note">上传后的文件会保存到服务器配置目录下的 <code>uploads/</code>，并作为本地 M3U/TXT 源参与合并。</div>
-            </form>
-          </div>
+          <div class="panel-title">源列表</div>
           <div class="sources" id="sources"></div>
 
           <div class="actions">
-            <button class="ghost" type="button" id="add-source">新增一条源地址</button>
+            <button class="ghost" type="button" id="add-source">新增一条订阅源</button>
             <form class="inline" method="post" action="/admin/refresh"><button class="ghost" type="submit">立即重新抓源</button></form>
             <button class="primary" type="submit">保存并刷新</button>
             {xhs_apply_action}
           </div>
           <div class="footer-note">{xhs_apply_hint}</div>
         </form>
+        </div>
+      </div>
+      </div>
 
-        <div class="panel-title" style="margin-top:28px;">源抓取诊断</div>
+      <div class="panel-section" data-section="diagnostics">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">频道诊断</div>
+            <div class="sub">把抓源状态、输出方式、代理地区和整合频道放到一页里集中排查。</div>
+          </div>
+        </div>
+        <div class="panel-body">
+        <div class="panel-title">源抓取诊断</div>
         <div class="sub">这里会直接告诉你每条源有没有抓到、抓到多少频道、耗时多少、是直连还是代理，以及代理出口地区。</div>
         <div class="diagnostics" style="margin-top:14px;">
           <div class="diag-table-wrap">
@@ -3172,6 +3359,11 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         <div class="diagnostics" style="margin-top:14px;">
           <div class="diag-toolbar">
             <input id="channel-diagnostics-search" class="diag-search" placeholder="搜索频道名 / 分组 / 来源">
+            <select id="channel-mode-filter" class="diag-filter">
+              <option value="">全部输出方式</option>
+              <option value="直连">仅直连</option>
+              <option value="代理">仅代理</option>
+            </select>
           </div>
           <div class="diag-table-wrap">
             <table>
@@ -3193,8 +3385,20 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
             </table>
           </div>
         </div>
+        </div>
+      </div>
+      </div>
 
-        <div class="panel-title" style="margin-top:28px;">节目单录制</div>
+      <div class="panel-section" data-section="recordings">
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">EPG 与录制</div>
+            <div class="sub">按节目单时间链创建录制任务，并设置提前和延后分钟数。</div>
+          </div>
+        </div>
+        <div class="panel-body">
+        <div class="panel-title">节目单录制</div>
         <div class="grid">
           <div class="field full">
             <label for="record-channel">选择频道</label>
@@ -3220,6 +3424,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         <div class="footer-note">保存后会直接写入服务器配置文件，并重新抓取频道列表。节目单会按缓存策略落盘，`/epg.xml.gz` 适合给播放器长期订阅。</div>
         </div>
       </div>
+      </div>
     </div>
   </div>
 
@@ -3235,12 +3440,26 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
           <input data-role="name" name="source_name" placeholder="例如 客厅主源">
         </div>
         <div class="field">
-          <label>m3u 地址</label>
+          <label>源类型</label>
+          <select data-role="kind">
+            <option value="remote">订阅源地址</option>
+            <option value="local">本地文件路径</option>
+          </select>
+        </div>
+        <div class="field">
+          <label data-role="url-label">m3u 地址</label>
           <input data-role="url" name="source_url" placeholder="https://example.com/live.m3u">
         </div>
         <div class="field">
           <label>代理地址（可选）</label>
           <input data-role="proxy_url" name="source_proxy_url" placeholder="http://127.0.0.1:7890">
+        </div>
+        <div class="field">
+          <label>输出方式</label>
+          <select data-role="output_mode" name="source_output_mode">
+            <option value="proxy">代理输出</option>
+            <option value="direct">直连输出</option>
+          </select>
         </div>
       </div>
       <label class="toggle">
@@ -3256,9 +3475,19 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     const channelStatuses = {channel_statuses_json};
     const channels = {channels_json};
     const recordings = {recordings_json};
+    const navTabs = [...document.querySelectorAll(".nav-tab")];
+    const panelSections = [...document.querySelectorAll(".panel-section")];
     const container = document.getElementById("sources");
     const template = document.getElementById("source-template");
     const addButton = document.getElementById("add-source");
+    const quickAddButton = document.getElementById("quick-add-source");
+    const quickAddKind = document.getElementById("quick-add-kind");
+    const uploadSourceCard = document.getElementById("upload-source-card");
+    const publicBaseUrlInput = document.getElementById("public_base_url");
+    const domainGeneratorInput = document.getElementById("domain-generator-input");
+    const domainGeneratorScheme = document.getElementById("domain-generator-scheme");
+    const generateDomainLinksButton = document.getElementById("generate-domain-links");
+    const generatedLinkList = document.getElementById("generated-link-list");
     const channelInput = document.getElementById("record-channel");
     const channelList = document.getElementById("record-channel-list");
     const timeline = document.getElementById("epg-timeline");
@@ -3267,6 +3496,21 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     const sourceStatusBody = document.getElementById("source-status-body");
     const channelStatusBody = document.getElementById("channel-status-body");
     const channelDiagnosticsSearch = document.getElementById("channel-diagnostics-search");
+    const channelModeFilter = document.getElementById("channel-mode-filter");
+
+    function showSection(sectionName) {{
+      navTabs.forEach((button) => {{
+        button.classList.toggle("active", button.dataset.sectionTarget === sectionName);
+      }});
+      panelSections.forEach((panel) => {{
+        panel.classList.toggle("active", panel.dataset.section === sectionName);
+      }});
+      window.scrollTo({{ top: 0, behavior: "smooth" }});
+    }}
+
+    navTabs.forEach((button) => {{
+      button.addEventListener("click", () => showSection(button.dataset.sectionTarget));
+    }});
 
     function refreshIndexes() {{
       [...container.querySelectorAll(".source-card")].forEach((card, index) => {{
@@ -3276,12 +3520,69 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       }});
     }}
 
-    function addSourceRow(source = {{ name: "", url: "", proxy_url: "", enabled: true }}) {{
+    function normalizeBaseUrl(rawValue, preferredScheme) {{
+      const value = (rawValue || "").trim();
+      if (!value) return "";
+      if (/^https?:\/\//i.test(value)) {{
+        return value.replace(/\/+$/, "");
+      }}
+      return preferredScheme + "://" + value.replace(/^\/+/, "").replace(/\/+$/, "");
+    }}
+
+    function renderGeneratedLinks(baseUrl) {{
+      if (!baseUrl) {{
+        generatedLinkList.innerHTML = "";
+        return;
+      }}
+      const links = [
+        {{ label: "M3U 主订阅", url: baseUrl + "/list.m3u" }},
+        {{ label: "M3U 短地址", url: baseUrl + "/m3u" }},
+        {{ label: "TXT 订阅", url: baseUrl + "/txt" }},
+        {{ label: "EPG 节目单", url: baseUrl + "/epg.xml.gz" }},
+        {{ label: "后台地址", url: baseUrl + "/admin" }}
+      ];
+      generatedLinkList.innerHTML = links.map((item) => `
+        <div class="link-item">
+          <label>${{item.label}}</label>
+          <code>${{item.url}}</code>
+        </div>
+      `).join("");
+    }}
+
+    function applySourceKind(node, kind) {{
+      const normalizedKind = kind === "local" ? "local" : "remote";
+      const urlLabel = node.querySelector('[data-role="url-label"]');
+      const urlInput = node.querySelector('[data-role="url"]');
+      const proxyInput = node.querySelector('[data-role="proxy_url"]');
+      const outputModeInput = node.querySelector('[data-role="output_mode"]');
+      const proxyField = proxyInput.closest(".field");
+      node.querySelector('[data-role="kind"]').value = normalizedKind;
+      if (normalizedKind === "local") {{
+        urlLabel.textContent = "本地 txt / m3u 路径";
+        urlInput.placeholder = "/app/config/uploads/local-list.m3u";
+        proxyField.style.display = outputModeInput.value === "direct" ? "none" : "";
+        if (outputModeInput.value === "direct") {{
+          proxyInput.value = "";
+        }}
+      }} else {{
+        urlLabel.textContent = "m3u 地址";
+        urlInput.placeholder = "https://example.com/live.m3u";
+        proxyField.style.display = outputModeInput.value === "direct" ? "none" : "";
+      }}
+    }}
+
+    function addSourceRow(source = {{ name: "", source_kind: "remote", url: "", proxy_url: "", output_mode: "proxy", enabled: true }}) {{
       const node = template.content.firstElementChild.cloneNode(true);
       const enabledInput = node.querySelector('[data-role="enabled"]');
+      const kindInput = node.querySelector('[data-role="kind"]');
+      const outputModeInput = node.querySelector('[data-role="output_mode"]');
       node.querySelector('[data-role="name"]').value = source.name || "";
       node.querySelector('[data-role="url"]').value = source.url || "";
       node.querySelector('[data-role="proxy_url"]').value = source.proxy_url || "";
+      outputModeInput.value = source.output_mode === "direct" ? "direct" : "proxy";
+      applySourceKind(node, source.source_kind || "remote");
+      kindInput.addEventListener("change", () => applySourceKind(node, kindInput.value));
+      outputModeInput.addEventListener("change", () => applySourceKind(node, kindInput.value));
       enabledInput.checked = source.enabled !== false;
       enabledInput.dataset.savedChecked = enabledInput.checked ? "true" : "false";
       enabledInput.addEventListener("change", () => toggleSourceEnabled(node, enabledInput));
@@ -3303,6 +3604,27 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
     }}
 
     addButton.addEventListener("click", () => addSourceRow());
+    quickAddButton.addEventListener("click", () => {{
+      if (quickAddKind.value === "local") {{
+        uploadSourceCard.scrollIntoView({{ behavior: "smooth", block: "center" }});
+        const fileInput = document.getElementById("upload-source-file");
+        if (fileInput) fileInput.click();
+        return;
+      }}
+      addSourceRow({{ source_kind: "remote", enabled: true }});
+      container.lastElementChild?.scrollIntoView({{ behavior: "smooth", block: "center" }});
+    }});
+    generateDomainLinksButton.addEventListener("click", () => {{
+      const baseUrl = normalizeBaseUrl(domainGeneratorInput.value, domainGeneratorScheme.value);
+      if (!baseUrl) {{
+        alert("先输入域名再生成");
+        return;
+      }}
+      publicBaseUrlInput.value = baseUrl;
+      renderGeneratedLinks(baseUrl);
+      publicBaseUrlInput.scrollIntoView({{ behavior: "smooth", block: "center" }});
+    }});
+    renderGeneratedLinks(normalizeBaseUrl(publicBaseUrlInput.value, domainGeneratorScheme.value));
 
     async function toggleSourceEnabled(card, input) {{
       const index = Number(card.dataset.index || input.value);
@@ -3358,11 +3680,12 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       }});
     }}
 
-    function renderChannelStatuses(keyword = "") {{
+    function renderChannelStatuses(keyword = "", mode = "") {{
       const normalized = keyword.trim().toLowerCase();
       channelStatusBody.innerHTML = "";
       channelStatuses
         .filter((item) => {{
+          if (mode && item.access_mode !== mode) return false;
           if (!normalized) return true;
           return [
             item.name,
@@ -3392,7 +3715,11 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
 
     renderSourceStatuses();
     renderChannelStatuses();
-    channelDiagnosticsSearch.addEventListener("input", (event) => renderChannelStatuses(event.target.value));
+    function rerenderChannelDiagnostics() {{
+      renderChannelStatuses(channelDiagnosticsSearch.value, channelModeFilter.value);
+    }}
+    channelDiagnosticsSearch.addEventListener("input", rerenderChannelDiagnostics);
+    channelModeFilter.addEventListener("change", rerenderChannelDiagnostics);
 
     channels.forEach((channel) => {{
       const option = document.createElement("option");
