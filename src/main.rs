@@ -78,6 +78,8 @@ struct Config {
     sources: Vec<SourceConfig>,
     #[serde(default)]
     channel_refresh_rules: Vec<ChannelRefreshRule>,
+    #[serde(default)]
+    classification_rules: Vec<ClassificationRule>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,6 +98,12 @@ struct ChannelRefreshRule {
     enabled: bool,
     channel_name: Option<String>,
     source_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ClassificationRule {
+    category: String,
+    keywords: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -245,6 +253,7 @@ struct AdminPageData {
     epg_cache_minutes: String,
     epg_cache_dir: String,
     recordings_dir: String,
+    classification_rules_text: String,
     signing_secret: String,
     sources: Vec<AdminSourceView>,
     source_statuses_json: String,
@@ -886,7 +895,14 @@ async fn refresh_channels(state: &AppState) {
             continue;
         }
 
-        match fetch_source_channels(&state.client, source, &user_agent).await {
+        match fetch_source_channels(
+            &state.client,
+            source,
+            &user_agent,
+            &config.classification_rules,
+        )
+        .await
+        {
             Ok(result) => {
                 let mut unique_count = 0usize;
                 for channel in result.channels {
@@ -1028,7 +1044,14 @@ async fn refresh_selected_sources(state: &AppState, source_names: &[String]) {
             continue;
         }
 
-        match fetch_source_channels(&state.client, source, &user_agent).await {
+        match fetch_source_channels(
+            &state.client,
+            source,
+            &user_agent,
+            &config.classification_rules,
+        )
+        .await
+        {
             Ok(result) => {
                 let mut unique_count = 0usize;
                 for channel in result.channels {
@@ -1161,6 +1184,7 @@ async fn fetch_source_channels(
     client: &Client,
     source: &SourceConfig,
     user_agent: &str,
+    classification_rules: &[ClassificationRule],
 ) -> anyhow::Result<FetchSourceResult> {
     let mut latency_ms = 0u64;
     let text = if is_remote_url(&source.url) {
@@ -1239,7 +1263,8 @@ async fn fetch_source_channels(
 
         let upstream_url = rewrite_loopback_stream_url(&source.url, line);
         let normalized_name = normalize_channel_name(&meta.name);
-        let output_group = classify_channel_group(&meta.name, &meta.group, &source.name);
+        let output_group =
+            classify_channel_group(&meta.name, &meta.group, &source.name, classification_rules);
         let source_slug = slugify_source_name(&source.name);
         let id = build_channel_id(&source_slug, &normalized_name, &upstream_url);
         channels.push(Channel {
@@ -1320,7 +1345,156 @@ fn normalize_channel_name(name: &str) -> String {
         .collect::<String>()
 }
 
-fn classify_channel_group(name: &str, original_group: &str, source_name: &str) -> String {
+fn default_classification_rules() -> Vec<ClassificationRule> {
+    vec![
+        ClassificationRule {
+            category: "世界杯回放".to_string(),
+            keywords: ["世界杯回放", "world cup replay", "fifa replay", "回放"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        ClassificationRule {
+            category: "央视".to_string(),
+            keywords: ["cctv", "央视", "cgtn"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        ClassificationRule {
+            category: "卫视".to_string(),
+            keywords: ["卫视"].into_iter().map(str::to_string).collect(),
+        },
+        ClassificationRule {
+            category: "香港".to_string(),
+            keywords: [
+                "凤凰",
+                "翡翠台",
+                "本港台",
+                "j2",
+                "viutv",
+                "香港",
+                "hoy",
+                "tvb",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        },
+        ClassificationRule {
+            category: "台湾".to_string(),
+            keywords: [
+                "台湾",
+                "台视",
+                "中视",
+                "华视",
+                "民视",
+                "东森",
+                "三立",
+                "纬来",
+                "八大",
+                "年代",
+                "爱尔达",
+                "靖天",
+                "4gtv",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        },
+        ClassificationRule {
+            category: "4K".to_string(),
+            keywords: ["4k", "uhd", "超高清"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        ClassificationRule {
+            category: "电影".to_string(),
+            keywords: ["电影", "cinema", "movie", "amc", "影"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        ClassificationRule {
+            category: "体育".to_string(),
+            keywords: ["体育", "sport", "espn", "eleven", "fox sports", "bein"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        ClassificationRule {
+            category: "新闻".to_string(),
+            keywords: ["新闻", "news", "财经", "bloomberg", "cnbc", "凤凰资讯"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        ClassificationRule {
+            category: "少儿".to_string(),
+            keywords: ["少儿", "卡通", "kid", "kids", "动画", "亲子"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        ClassificationRule {
+            category: "综艺".to_string(),
+            keywords: ["综艺", "娱乐", "show", "variety"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        ClassificationRule {
+            category: "纪录".to_string(),
+            keywords: ["纪录", "history", "discovery", "animal", "nature"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+    ]
+}
+
+fn classification_rules_text(rules: &[ClassificationRule]) -> String {
+    rules
+        .iter()
+        .map(|rule| format!("{}={}", rule.category, rule.keywords.join("|")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_classification_rules(input: &str) -> Vec<ClassificationRule> {
+    let mut rules = Vec::new();
+    for line in input.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((category, keywords_raw)) = line.split_once('=') else {
+            continue;
+        };
+        let keywords = keywords_raw
+            .split('|')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if category.trim().is_empty() || keywords.is_empty() {
+            continue;
+        }
+        rules.push(ClassificationRule {
+            category: category.trim().to_string(),
+            keywords,
+        });
+    }
+    rules
+}
+
+fn classify_channel_group(
+    name: &str,
+    original_group: &str,
+    source_name: &str,
+    classification_rules: &[ClassificationRule],
+) -> String {
     let text = format!(
         "{} {} {}",
         name.to_lowercase(),
@@ -1328,66 +1502,19 @@ fn classify_channel_group(name: &str, original_group: &str, source_name: &str) -
         source_name.to_lowercase()
     );
 
-    let contains_any = |patterns: &[&str]| patterns.iter().any(|pattern| text.contains(pattern));
-
-    if contains_any(&["世界杯回放", "world cup replay", "fifa replay", "回放"]) {
-        return "世界杯回放".to_string();
-    }
-    if contains_any(&["cctv", "央视", "cgtn"]) {
-        return "央视".to_string();
-    }
-    if contains_any(&["卫视"]) {
-        return "卫视".to_string();
-    }
-    if contains_any(&[
-        "凤凰",
-        "翡翠台",
-        "本港台",
-        "j2",
-        "viutv",
-        "香港",
-        "hoy",
-        "tvb",
-    ]) {
-        return "香港".to_string();
-    }
-    if contains_any(&[
-        "台湾",
-        "台视",
-        "中视",
-        "华视",
-        "民视",
-        "东森",
-        "三立",
-        "纬来",
-        "八大",
-        "年代",
-        "爱尔达",
-        "靖天",
-        "4gtv",
-    ]) {
-        return "台湾".to_string();
-    }
-    if contains_any(&["4k", "uhd", "超高清"]) {
-        return "4K".to_string();
-    }
-    if contains_any(&["电影", "cinema", "movie", "amc", "影"]) {
-        return "电影".to_string();
-    }
-    if contains_any(&["体育", "sport", "espn", "eleven", "fox sports", "bein"]) {
-        return "体育".to_string();
-    }
-    if contains_any(&["新闻", "news", "财经", "bloomberg", "cnbc", "凤凰资讯"]) {
-        return "新闻".to_string();
-    }
-    if contains_any(&["少儿", "卡通", "kid", "kids", "动画", "亲子"]) {
-        return "少儿".to_string();
-    }
-    if contains_any(&["综艺", "娱乐", "show", "variety"]) {
-        return "综艺".to_string();
-    }
-    if contains_any(&["纪录", "history", "discovery", "animal", "nature"]) {
-        return "纪录".to_string();
+    let rules = if classification_rules.is_empty() {
+        default_classification_rules()
+    } else {
+        classification_rules.to_vec()
+    };
+    for rule in rules {
+        if rule
+            .keywords
+            .iter()
+            .any(|keyword| text.contains(&keyword.to_lowercase()))
+        {
+            return rule.category;
+        }
     }
     if original_group.trim().is_empty() || original_group.eq_ignore_ascii_case("ungrouped") {
         return "其它".to_string();
@@ -2368,6 +2495,11 @@ async fn admin_page(
         .iter()
         .map(|item| (item.channel_id.clone(), item.clone()))
         .collect::<HashMap<_, _>>();
+    let effective_classification_rules = if config.classification_rules.is_empty() {
+        default_classification_rules()
+    } else {
+        config.classification_rules.clone()
+    };
     let channel_statuses_json = serde_json::to_string(
         &channels_snapshot
             .iter()
@@ -2502,6 +2634,7 @@ async fn admin_page(
         recordings_dir: config
             .recordings_dir
             .unwrap_or_else(|| "/app/config/recordings".to_string()),
+        classification_rules_text: classification_rules_text(&effective_classification_rules),
         signing_secret: config.signing_secret,
         sources: if config.sources.is_empty() {
             vec![AdminSourceView {
@@ -2629,6 +2762,14 @@ async fn save_admin(
         return Err(AppError::bad_request("签名密钥不能为空"));
     }
 
+    let classification_rules = parse_classification_rules(
+        values
+            .get("classification_rules")
+            .and_then(|v| v.first())
+            .map(String::as_str)
+            .unwrap_or(""),
+    );
+
     let new_config = Config {
         bind: Some("0.0.0.0:8787".to_string()),
         public_base_url: clean_optional(first_value(&values, "public_base_url")),
@@ -2644,6 +2785,7 @@ async fn save_admin(
         signing_secret,
         sources,
         channel_refresh_rules: state.config.read().await.channel_refresh_rules.clone(),
+        classification_rules,
     };
 
     persist_config(&state, new_config).await?;
@@ -3526,7 +3668,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       font-weight: 600;
       letter-spacing: -0.01em;
     }}
-    input, select {{
+    input, select, textarea {{
       width: 100%;
       border: 1px solid rgba(60, 60, 67, 0.14);
       background: rgba(255, 255, 255, 0.92);
@@ -3538,10 +3680,16 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
       transition: border-color .18s ease, box-shadow .18s ease, background .18s ease;
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
     }}
-    input::placeholder {{
+    textarea {{
+      min-height: 220px;
+      resize: vertical;
+      font-family: "SF Mono", "Menlo", monospace;
+      line-height: 1.5;
+    }}
+    input::placeholder, textarea::placeholder {{
       color: #8e8e93;
     }}
-    input:focus, select:focus {{
+    input:focus, select:focus, textarea:focus {{
       border-color: rgba(0, 113, 227, 0.55);
       box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.14);
       background: #fff;
@@ -4139,6 +4287,11 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
             <div class="field full">
               <label for="recordings_dir">录制输出目录</label>
               <input id="recordings_dir" name="recordings_dir" value="{recordings_dir}" placeholder="例如 /app/config/recordings">
+            </div>
+            <div class="field full">
+              <label for="classification_rules">频道自动分类规则</label>
+              <textarea id="classification_rules" name="classification_rules" placeholder="每行一个规则，格式：分类名=关键词1|关键词2|关键词3">{classification_rules_text}</textarea>
+              <div class="footer-note" style="margin-top:4px;">按从上到下的顺序匹配，越靠前优先级越高。支持写注释行，以 <code>#</code> 开头。以后新增任何源，频道都会按这里的规则自动分类到输出订阅里。</div>
             </div>
             <div class="field full">
               <label for="xhs_a1">xhsuhd 的 a1 Cookie</label>
@@ -4892,6 +5045,7 @@ fn render_admin_page(data: AdminPageData) -> Result<String, AppError> {
         epg_cache_minutes = escape_html(&data.epg_cache_minutes),
         epg_cache_dir = escape_html(&data.epg_cache_dir),
         recordings_dir = escape_html(&data.recordings_dir),
+        classification_rules_text = escape_html(&data.classification_rules_text),
         signing_secret = escape_html(&data.signing_secret),
         sources_json = sources_json,
         source_statuses_json = data.source_statuses_json,
