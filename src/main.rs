@@ -317,17 +317,21 @@ fn parse_source(text: &str, base: &Url, source: &Source) -> (Vec<Channel>, Vec<S
             if !matches!(url.scheme(), "http" | "https") {
                 continue;
             }
-            let upstream_url = rewrite_upstream_url(&url, source.upstream_base_url.as_deref());
-            let catchup = attribute(&extinf, "catchup-source").map(|value| {
-                rewrite_upstream_template(&value, &url, source.upstream_base_url.as_deref())
-            });
+            let internal_base_url = if source.mode == Mode::Proxy {
+                source.upstream_base_url.as_deref()
+            } else {
+                None
+            };
+            let upstream_url = rewrite_upstream_url(&url, internal_base_url);
+            let catchup = attribute(&extinf, "catchup-source")
+                .map(|value| rewrite_upstream_template(&value, &url, internal_base_url));
             let id = hex_id(&format!("{}\n{}\n{}", source.id, extinf, url));
             channels.push(Channel {
                 id,
                 source_id: source.id.clone(),
                 source_name: source.name.clone(),
                 mode: source.mode,
-                upstream_base_url: source.upstream_base_url.clone(),
+                upstream_base_url: internal_base_url.map(str::to_string),
                 catchup,
                 extinf,
                 url: upstream_url,
@@ -746,7 +750,7 @@ async fn admin(
     for source in &sources {
         let status = statuses.get(&source.id).cloned().unwrap_or_default();
         rows.push_str(&format!(
-            "<article><form action=\"/admin/sources\" method=\"post\"><input type=\"hidden\" name=\"id\" value=\"{}\"><label>名称<input name=\"name\" required value=\"{}\"></label><label>订阅 URL<input name=\"url\" type=\"url\" required value=\"{}\"></label><label>内部上游地址（可选）<input name=\"upstream_base_url\" type=\"url\" value=\"{}\" placeholder=\"例如 http://10.10.10.20:8097\"></label><label>播放方式<select name=\"mode\"><option value=\"direct\" {}>直连</option><option value=\"proxy\" {}>中转</option></select></label><label class=\"check\"><input type=\"checkbox\" name=\"enabled\" value=\"true\" {}>启用</label><button type=\"submit\">保存</button></form><form action=\"/admin/sources/delete\" method=\"post\" onsubmit=\"return confirm('删除这条源？')\"><input type=\"hidden\" name=\"id\" value=\"{}\"><button class=\"secondary\" type=\"submit\">删除</button></form><p class=\"status\">{} · {} 个频道{} {}</p></article>",
+            "<article><form action=\"/admin/sources\" method=\"post\"><input type=\"hidden\" name=\"id\" value=\"{}\"><label>名称<input name=\"name\" required value=\"{}\"></label><label>订阅 URL<input name=\"url\" type=\"url\" required value=\"{}\"></label><label>内部上游地址（仅中转时可选）<input name=\"upstream_base_url\" type=\"url\" value=\"{}\" placeholder=\"例如 http://10.10.10.20:8097\"></label><label>播放方式<select name=\"mode\"><option value=\"direct\" {}>直连</option><option value=\"proxy\" {}>中转</option></select></label><label class=\"check\"><input type=\"checkbox\" name=\"enabled\" value=\"true\" {}>启用</label><button type=\"submit\">保存</button></form><form action=\"/admin/sources/delete\" method=\"post\" onsubmit=\"return confirm('删除这条源？')\"><input type=\"hidden\" name=\"id\" value=\"{}\"><button class=\"secondary\" type=\"submit\">删除</button></form><p class=\"status\">{} · {} 个频道{} {}</p></article>",
             escape(&source.id), escape(&source.name), escape(&source.url),
             escape(source.upstream_base_url.as_deref().unwrap_or("")),
             if source.mode == Mode::Direct { "selected" } else { "" },
@@ -890,12 +894,27 @@ mod tests {
     }
 
     #[test]
-    fn direct_keeps_replay_metadata() {
-        let info = "#EXTINF:-1 catchup=\"default\" catchup-source=\"http://origin/replay\",CCTV1";
-        assert!(
-            set_attribute(info, "access-mode", "direct")
-                .contains("catchup-source=\"http://origin/replay\"")
+    fn direct_keeps_public_live_and_replay_even_with_internal_base() {
+        let public = "https://gitv.example";
+        let source = Source {
+            id: "gitv".into(),
+            name: "GITV".into(),
+            url: "http://internal/tv.m3u".into(),
+            mode: Mode::Direct,
+            enabled: true,
+            upstream_base_url: Some("http://internal".into()),
+        };
+        let text = format!(
+            "#EXTM3U\n#EXTINF:-1 catchup=\"default\" catchup-source=\"{public}/catchup/CCTV1?start=${{(b)timestamp}}&end=${{(e)timestamp}}\",CCTV1\n{public}/live/CCTV1\n"
         );
+        let (channels, _) = parse_source(&text, &Url::parse(&source.url).unwrap(), &source);
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].url, format!("{public}/live/CCTV1"));
+        assert_eq!(
+            channels[0].catchup.as_deref(),
+            Some("https://gitv.example/catchup/CCTV1?start=${(b)timestamp}&end=${(e)timestamp}")
+        );
+        assert!(channels[0].upstream_base_url.is_none());
     }
 
     #[test]
