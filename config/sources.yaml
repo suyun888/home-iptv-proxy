@@ -1,25 +1,5 @@
-bind: 0.0.0.0:8787
+bind: 0.0.0.0:28788
 public_base_url: null
-epg_source_url: null
-epg_proxy_url: null
-epg_cache_minutes: 720
-epg_cache_dir: /app/config/cache
-recordings_dir: /app/config/recordings
-xhs_a1: null
-xhs_web_session: null
 refresh_minutes: 30
-user_agent: "home-iptv-proxy/0.1"
-signing_secret: "change-this-secret"
-sources:
-  - name: "xhsuhd"
-    url: "http://xhsuhd:34567/xhslist.m3u"
-    proxy_url: null
-    enabled: true
-  - name: "4gtv"
-    url: "http://iptv-4gtv-system:5050/4gtv.m3u?token=change-this-token"
-    proxy_url: null
-    enabled: false
-  - name: "source-b"
-    url: "https://example.com/playlist-b.m3u"
-    proxy_url: null
-    enabled: false
+signing_secret: replace-this-with-your-own-random-secret
+sources: []

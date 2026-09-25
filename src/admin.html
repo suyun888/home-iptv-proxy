@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>源管理 · home-iptv-proxy</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f5f7f7; color: #203033; font: 15px system-ui, -apple-system, sans-serif; }
+    header { background: #17363b; color: white; padding: 18px 24px; }
+    h1 { font-size: 20px; margin: 0; }
+    main { max-width: 980px; margin: auto; padding: 24px; }
+    h2 { font-size: 17px; margin: 28px 0 14px; }
+    .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+    a { color: #14535c; }
+    article { border: 1px solid #d5dfe0; background: white; padding: 18px; margin-bottom: 10px; border-radius: 6px; }
+    article form:first-child, .new { display: grid; grid-template-columns: 1fr 2fr 130px 90px; gap: 12px; align-items: end; }
+    label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; }
+    input, select { font: inherit; border: 1px solid #aebfc1; border-radius: 4px; padding: 9px; background: white; min-width: 0; width: 100%; }
+    .check { flex-direction: row; align-items: center; padding-bottom: 10px; white-space: nowrap; }
+    .check input { width: auto; }
+    button { background: #137481; color: white; border: 0; border-radius: 4px; padding: 10px 14px; cursor: pointer; font: inherit; }
+    button.secondary { background: #e8eeee; color: #344a4e; }
+    article form + form { margin-top: 10px; }
+    .status, .empty { color: #52696e; font-size: 13px; }
+    .status { margin: 10px 0 0; }
+    @media (max-width: 700px) {
+      article form:first-child, .new { grid-template-columns: 1fr; }
+      .check { padding: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header><h1>home-iptv-proxy · 源管理</h1></header>
+  <main>
+    <div class="top">
+      <a href="/list.m3u">订阅地址 /list.m3u</a>
+      <form action="/admin/refresh" method="post"><button type="submit">刷新全部</button></form>
+    </div>
+    <h2>已添加的源</h2>
+    {{SOURCE_ROWS}}
+    <h2>添加源</h2>
+    <article>
+      <form class="new" action="/admin/sources" method="post">
+        <label>名称<input name="name" required></label>
+        <label>订阅 URL<input name="url" type="url" required placeholder="http://.../list.m3u"></label>
+        <label>播放方式
+          <select name="mode" required>
+            <option value="direct">直连</option>
+            <option value="proxy">中转</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" name="enabled" value="true" checked>启用</label>
+        <button type="submit">添加源</button>
+      </form>
+    </article>
+  </main>
+</body>
+</html>

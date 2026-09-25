@@ -1,4 +1,6 @@
 target
+.env
+config
 .git
 .DS_Store
 outputs
