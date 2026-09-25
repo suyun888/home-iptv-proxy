@@ -21,6 +21,13 @@
 
 GITV 源可添加其现有订阅接口并选择“中转”。服务保留上游 M3U 的 x-tvg-url，把频道级 catchup-source 转成 APTV 的 catchup=default 和本地时间戳回放入口。4GTV 源选择“直连”，下发它原来的频道地址。
 
+如果源对外输出的是反代地址，但服务所在主机可以通过内网直接访问同一上游，可以为该源填写可选的 upstream_base_url。服务只在内部中转时把频道、HLS 子清单、分片和密钥映射到这个地址；源本身对外输出的地址不会被修改。GITV 的典型配置是：
+
+    name: GITV
+    url: http://10.10.10.20:8097/tv.m3u
+    mode: proxy
+    upstream_base_url: http://10.10.10.20:8097
+
 ## 接口
 
 - /list.m3u：聚合订阅

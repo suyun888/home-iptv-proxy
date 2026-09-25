@@ -64,6 +64,8 @@ struct Source {
     url: String,
     mode: Mode,
     enabled: bool,
+    #[serde(default)]
+    upstream_base_url: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +90,7 @@ struct Channel {
     source_id: String,
     source_name: String,
     mode: Mode,
+    upstream_base_url: Option<String>,
     extinf: String,
     url: String,
     catchup: Option<String>,
@@ -116,6 +119,8 @@ struct SourceForm {
     mode: Mode,
     #[serde(default)]
     enabled: bool,
+    #[serde(default)]
+    upstream_base_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -312,19 +317,52 @@ fn parse_source(text: &str, base: &Url, source: &Source) -> (Vec<Channel>, Vec<S
             if !matches!(url.scheme(), "http" | "https") {
                 continue;
             }
+            let upstream_url = rewrite_upstream_url(&url, source.upstream_base_url.as_deref());
+            let catchup = attribute(&extinf, "catchup-source").map(|value| {
+                rewrite_upstream_template(&value, &url, source.upstream_base_url.as_deref())
+            });
             let id = hex_id(&format!("{}\n{}\n{}", source.id, extinf, url));
             channels.push(Channel {
                 id,
                 source_id: source.id.clone(),
                 source_name: source.name.clone(),
                 mode: source.mode,
-                catchup: attribute(&extinf, "catchup-source"),
+                upstream_base_url: source.upstream_base_url.clone(),
+                catchup,
                 extinf,
-                url: url.to_string(),
+                url: upstream_url,
             });
         }
     }
     (channels, epg_urls)
+}
+
+fn rewrite_upstream_url(url: &Url, upstream_base_url: Option<&str>) -> String {
+    let Some(base) = upstream_base_url.and_then(|value| Url::parse(value).ok()) else {
+        return url.to_string();
+    };
+    let mut rewritten = base;
+    rewritten.set_path(url.path());
+    rewritten.set_query(url.query());
+    rewritten.set_fragment(url.fragment());
+    rewritten.to_string()
+}
+
+fn rewrite_upstream_template(
+    template: &str,
+    public_url: &Url,
+    upstream_base_url: Option<&str>,
+) -> String {
+    let Some(base) = upstream_base_url.and_then(|value| Url::parse(value).ok()) else {
+        return template.to_string();
+    };
+    let public_origin = public_url.origin().ascii_serialization();
+    if !template.starts_with(&public_origin) {
+        return template.to_string();
+    }
+    let mut rewritten = base.origin().ascii_serialization();
+    rewritten.push_str(&template[public_origin.len()..]);
+    rewritten
 }
 
 fn hex_id(input: &str) -> String {
@@ -583,7 +621,14 @@ async fn relay(
             .map_err(|_| AppError(StatusCode::BAD_GATEWAY, "invalid upstream playlist"))?;
         let base = base_url(state, headers).await;
         let secret = state.config.read().await.signing_secret.clone();
-        let rewritten = rewrite_hls(&text, &final_url, &base, &secret, &channel.id)?;
+        let rewritten = rewrite_hls(
+            &text,
+            &final_url,
+            &base,
+            &secret,
+            &channel.id,
+            channel.upstream_base_url.as_deref(),
+        )?;
         let mut response = Response::new(Body::from(rewritten));
         response.headers_mut().insert(
             header::CONTENT_TYPE,
@@ -621,6 +666,7 @@ fn rewrite_hls(
     base: &str,
     secret: &str,
     id: &str,
+    upstream_base_url: Option<&str>,
 ) -> Result<String, AppError> {
     let mut output = String::new();
     for raw in text.lines() {
@@ -634,10 +680,11 @@ fn rewrite_hls(
                     let absolute = origin.join(&raw[value_start..value_end]).map_err(|_| {
                         AppError(StatusCode::BAD_GATEWAY, "invalid upstream playlist")
                     })?;
+                    let target = rewrite_upstream_url(&absolute, upstream_base_url);
                     rewritten = format!(
                         "{}{}{}",
                         &raw[..value_start],
-                        proxy_url(base, secret, id, absolute.as_str()),
+                        proxy_url(base, secret, id, &target),
                         &raw[value_end..]
                     );
                 }
@@ -647,7 +694,8 @@ fn rewrite_hls(
             let absolute = origin
                 .join(line)
                 .map_err(|_| AppError(StatusCode::BAD_GATEWAY, "invalid upstream playlist"))?;
-            output.push_str(&proxy_url(base, secret, id, absolute.as_str()));
+            let target = rewrite_upstream_url(&absolute, upstream_base_url);
+            output.push_str(&proxy_url(base, secret, id, &target));
         }
         output.push('\n');
     }
@@ -698,8 +746,9 @@ async fn admin(
     for source in &sources {
         let status = statuses.get(&source.id).cloned().unwrap_or_default();
         rows.push_str(&format!(
-            "<article><form action=\"/admin/sources\" method=\"post\"><input type=\"hidden\" name=\"id\" value=\"{}\"><label>名称<input name=\"name\" required value=\"{}\"></label><label>订阅 URL<input name=\"url\" type=\"url\" required value=\"{}\"></label><label>播放方式<select name=\"mode\"><option value=\"direct\" {}>直连</option><option value=\"proxy\" {}>中转</option></select></label><label class=\"check\"><input type=\"checkbox\" name=\"enabled\" value=\"true\" {}>启用</label><button type=\"submit\">保存</button></form><form action=\"/admin/sources/delete\" method=\"post\" onsubmit=\"return confirm('删除这条源？')\"><input type=\"hidden\" name=\"id\" value=\"{}\"><button class=\"secondary\" type=\"submit\">删除</button></form><p class=\"status\">{} · {} 个频道{} {}</p></article>",
+            "<article><form action=\"/admin/sources\" method=\"post\"><input type=\"hidden\" name=\"id\" value=\"{}\"><label>名称<input name=\"name\" required value=\"{}\"></label><label>订阅 URL<input name=\"url\" type=\"url\" required value=\"{}\"></label><label>内部上游地址（可选）<input name=\"upstream_base_url\" type=\"url\" value=\"{}\" placeholder=\"例如 http://10.10.10.20:8097\"></label><label>播放方式<select name=\"mode\"><option value=\"direct\" {}>直连</option><option value=\"proxy\" {}>中转</option></select></label><label class=\"check\"><input type=\"checkbox\" name=\"enabled\" value=\"true\" {}>启用</label><button type=\"submit\">保存</button></form><form action=\"/admin/sources/delete\" method=\"post\" onsubmit=\"return confirm('删除这条源？')\"><input type=\"hidden\" name=\"id\" value=\"{}\"><button class=\"secondary\" type=\"submit\">删除</button></form><p class=\"status\">{} · {} 个频道{} {}</p></article>",
             escape(&source.id), escape(&source.name), escape(&source.url),
+            escape(source.upstream_base_url.as_deref().unwrap_or("")),
             if source.mode == Mode::Direct { "selected" } else { "" },
             if source.mode == Mode::Proxy { "selected" } else { "" },
             if source.enabled { "checked" } else { "" },
@@ -749,12 +798,21 @@ async fn save_source(
         url,
         mode: form.mode,
         enabled: form.enabled,
+        upstream_base_url: form
+            .upstream_base_url
+            .filter(|value| !value.trim().is_empty()),
     };
     {
         let mut current = state.config.write().await;
         let mut updated = current.clone();
         if let Some(existing) = updated.sources.iter_mut().find(|row| row.id == id) {
-            *existing = source;
+            if source.upstream_base_url.is_none() {
+                let mut source = source;
+                source.upstream_base_url = existing.upstream_base_url.clone();
+                *existing = source;
+            } else {
+                *existing = source;
+            }
         } else {
             updated.sources.push(source);
         }
@@ -825,7 +883,7 @@ mod tests {
     fn hls_rewrites_keys_segments_and_variants() {
         let origin = Url::parse("http://host/master/index.m3u8").unwrap();
         let text = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nlow/index.m3u8\nseg.ts\n";
-        let result = rewrite_hls(text, &origin, "http://local", "secret", "channel").unwrap();
+        let result = rewrite_hls(text, &origin, "http://local", "secret", "channel", None).unwrap();
         assert!(result.contains("u=http%3A%2F%2Fhost%2Fmaster%2Fkey.bin"));
         assert!(result.contains("u=http%3A%2F%2Fhost%2Fmaster%2Flow%2Findex.m3u8"));
         assert!(result.contains("u=http%3A%2F%2Fhost%2Fmaster%2Fseg.ts"));
@@ -837,6 +895,23 @@ mod tests {
         assert!(
             set_attribute(info, "access-mode", "direct")
                 .contains("catchup-source=\"http://origin/replay\"")
+        );
+    }
+
+    #[test]
+    fn internal_upstream_rewrite_keeps_public_playlist_separate() {
+        let public = Url::parse("https://gitv.example/live/CCTV1").unwrap();
+        assert_eq!(
+            rewrite_upstream_url(&public, Some("http://10.10.10.20:8097")),
+            "http://10.10.10.20:8097/live/CCTV1"
+        );
+        assert_eq!(
+            rewrite_upstream_template(
+                "https://gitv.example/catchup/CCTV1?start=${(b)timestamp}&end=${(e)timestamp}",
+                &public,
+                Some("http://10.10.10.20:8097")
+            ),
+            "http://10.10.10.20:8097/catchup/CCTV1?start=${(b)timestamp}&end=${(e)timestamp}"
         );
     }
 }
