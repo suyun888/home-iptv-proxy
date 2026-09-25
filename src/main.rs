@@ -690,8 +690,8 @@ fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> 
 async fn admin(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Html<String>, Response<Body>> {
-    require_admin(&state, &headers).map_err(IntoResponse::into_response)?;
+) -> Result<Html<String>, AppError> {
+    require_admin(&state, &headers)?;
     let sources = state.config.read().await.sources.clone();
     let statuses = state.runtime.read().await.source_status.clone();
     let mut rows = String::new();
@@ -729,12 +729,12 @@ async fn save_source(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(form): Form<SourceForm>,
-) -> Result<Redirect, Response<Body>> {
-    require_admin(&state, &headers).map_err(IntoResponse::into_response)?;
+) -> Result<Redirect, AppError> {
+    require_admin(&state, &headers)?;
     let name = form.name.trim().to_string();
     let url = form.url.trim().to_string();
     if name.is_empty() || !valid_url(&url) {
-        return Err((StatusCode::BAD_REQUEST, "Invalid source").into_response());
+        return Err(AppError(StatusCode::BAD_REQUEST, "Invalid source"));
     }
     let id = form.id.filter(|id| !id.is_empty()).unwrap_or_else(|| {
         let nonce = SystemTime::now()
@@ -773,8 +773,8 @@ async fn delete_source(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(form): Form<IdForm>,
-) -> Result<Redirect, Response<Body>> {
-    require_admin(&state, &headers).map_err(IntoResponse::into_response)?;
+) -> Result<Redirect, AppError> {
+    require_admin(&state, &headers)?;
     {
         let mut current = state.config.write().await;
         let mut updated = current.clone();
@@ -789,22 +789,22 @@ async fn delete_source(
 async fn refresh_now(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Redirect, Response<Body>> {
-    require_admin(&state, &headers).map_err(IntoResponse::into_response)?;
+) -> Result<Redirect, AppError> {
+    require_admin(&state, &headers)?;
     refresh(&state).await;
     Ok(Redirect::to("/admin"))
 }
 
-async fn write_config(path: &PathBuf, config: &Config) -> Result<(), Response<Body>> {
+async fn write_config(path: &PathBuf, config: &Config) -> Result<(), AppError> {
     let body = serde_yaml::to_string(config)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Save failed").into_response())?;
+        .map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "Save failed"))?;
     let temporary = path.with_extension("yaml.tmp");
     tokio::fs::write(&temporary, body)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Save failed").into_response())?;
+        .map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "Save failed"))?;
     tokio::fs::rename(&temporary, path)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Save failed").into_response())?;
+        .map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "Save failed"))?;
     Ok(())
 }
 
